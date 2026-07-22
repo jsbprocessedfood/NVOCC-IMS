@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Maritime Tax Invoice Builder & Generator</title>
+  <meta name="description" content="Generate exact replica Maritime Tax Invoices with customizable company profiles, shipment details, and automated tax calculations.">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- SheetJS CDN for Excel Export -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <!-- QRCodeJS CDN for instant offline e-Invoice QR Code generation -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <!-- PDF.js CDN for PDF Text Extraction & PDF Invoice Import -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body>
+
+  <!-- Top App Navigation Header -->
+  <header class="app-header">
+    <div class="brand-container">
+      <div class="brand-icon">⚓</div>
+      <div class="brand-title">
+        <h1>NVOCC IMS System</h1>
+        <p>Invoice Format Generator & Multi-Company Manager</p>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <!-- Profile Manager -->
+      <div class="select-profile-wrapper">
+        <label for="companyProfileSelect">🏢 Company:</label>
+        <select id="companyProfileSelect" class="btn-select">
+          <option value="parekh">Parekh Marine Services Pvt Ltd</option>
+          <option value="jsb">JSB Cargo Movers Pvt Ltd</option>
+          <option value="custom1">My Custom Company 1</option>
+          <option value="dubai">DEVX LOGISTICS DMCC (Dubai)</option>
+          <option value="new">+ Add New Company Preset</option>
+        </select>
+      </div>
+
+      <button id="btnSaveProfile" class="btn btn-secondary" title="Save current company details as preset">💾 Save Profile</button>
+      <button id="btnLoadSample" class="btn btn-secondary" title="Load sample bill data (NSA065014708)">⚡ Sample Data</button>
+      <button id="btnSaveToDB" class="btn btn-primary" title="Save or update this invoice in Database">💾 Save Invoice</button>
+      <button id="btnDuplicateInv" class="btn btn-secondary" title="Clone current invoice details into a new invoice number">📋 Duplicate Invoice</button>
+      <button id="btnOpenDB" class="btn btn-accent" title="View Excel-like Master Database Sheet">📊 Master Sheet (<span id="dbCountBadge">0</span>)</button>
+      <button id="btnOpenEInvConsole" class="btn btn-secondary" title="Connect & Test E-Invoicing API (NIC Standard)">⚡ E-Invoice API</button>
+      <button id="btnExportCurrentTallyXML" class="btn btn-secondary" title="Export current invoice to Tally Prime XML">🟢 Tally XML</button>
+      <button id="btnToggleLayout" class="btn btn-secondary" title="Toggle Split / Form / Preview View">👁️ View Mode</button>
+      <button id="btnReset" class="btn btn-danger btn-sm" title="Clear all fields">🧹 Clear</button>
+      <button id="btnPrint" class="btn btn-success" title="Print or Save as A4 PDF">🖨️ Print / Save PDF</button>
+    </div>
+  </header>
+
+  <!-- Main Workspace Layout -->
+  <div class="app-container">
+    
+    <!-- LEFT PANEL: DATA ENTRY FORM EDITOR -->
+    <aside class="form-panel">
+      <div class="panel-header" style="flex-direction: column; align-items: flex-start; gap: 0.65rem;">
+        <div style="display: flex; justify-content: space-between; width: 100%; align-items: center;">
+          <h2>✏️ Invoice Details Editor</h2>
+          <span style="font-size: 0.75rem; color: var(--text-muted);">Real-time Live Sync</span>
+        </div>
+        <div class="doc-tabs" style="display: flex; width: 100%; gap: 0.25rem; background: rgba(255, 255, 255, 0.05); padding: 0.25rem; border-radius: 6px; border: 1px solid var(--border-color);">
+          <button type="button" id="tabTaxInvoice" class="btn btn-secondary active-tab" style="flex: 1; padding: 0.45rem; font-size: 0.75rem; font-weight: 600; border-radius: 4px; border: none; cursor: pointer; text-align: center; background: var(--btn-accent-bg); color: #fff;">🇮🇳 Tax Invoice</button>
+          <button type="button" id="tabCommercial" class="btn btn-secondary" style="flex: 1; padding: 0.45rem; font-size: 0.75rem; font-weight: 600; border-radius: 4px; border: none; cursor: pointer; text-align: center; background: transparent; color: var(--text-muted);">🇦🇪 Commercial Invoice</button>
+          <button type="button" id="tabCreditNote" class="btn btn-secondary" style="flex: 1; padding: 0.45rem; font-size: 0.75rem; font-weight: 600; border-radius: 4px; border: none; cursor: pointer; text-align: center; background: transparent; color: var(--text-muted);">✍️ Credit Note</button>
+        </div>
+      </div>
+
+      <div class="accordion">
+
+        <!-- 1. Seller / Company Profile Details -->
+        <div class="accordion-item" id="acc-company">
+          <div class="accordion-header" onclick="toggleAccordion('acc-company')">
+            <span class="title-badge">🏢 1. Seller Company Details</span>
+            <span class="accordion-icon">▼</span>
+          </div>
+          <div class="accordion-body">
+            <div class="form-group">
+              <label for="compName">Company Name</label>
+              <input type="text" id="compName" class="form-control" placeholder="Parekh Marine Services Private Limited">
+            </div>
+            <div class="form-group">
+              <label for="compLogoFile">Company Logo Image (Upload or URL)</label>
+              <div style="display: flex; gap: 0.5rem; align-items: center;">
+                <input type="file" id="compLogoFile" class="form-control" accept="image/*" style="font-size: 0.75rem; padding: 0.25rem;">
+                <button type="button" id="btnRemoveLogo" class="btn btn-danger btn-sm" title="Reset logo to default">Clear</button>
+              </div>
+              <input type="text" id="compLogoUrl" class="form-control" style="margin-top: 0.35rem;" placeholder="Or paste Logo Image Data/URL...">
+            </div>
+            <div class="form-group">
+              <label for="compAddress">Registered Address & Contact</label>
+              <textarea id="compAddress" class="form-control" rows="2" placeholder="Anchorage, CTS-275/B Village Deonar, Off. Govandi Station Rd, Govandi (E), Mumbai, 400088"></textarea>
+            </div>
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="compCIN">CIN</label>
+                <input type="text" id="compCIN" class="form-control" placeholder="U74999MH2017PTC291606">
+              </div>
+              <div class="form-group">
+                <label for="compState">State Code & Name</label>
+                <input type="text" id="compState" class="form-control" placeholder="27 State Name : Maharashtra">
+              </div>
+              <div class="form-group">
+                <label for="compGSTIN">GSTIN NO</label>
+                <input type="text" id="compGSTIN" class="form-control" placeholder="27AAJCP0051C1ZV">
+              </div>
+              <div class="form-group">
+                <label for="compPAN">PAN NO</label>
+                <input type="text" id="compPAN" class="form-control" placeholder="AAJCP0051C">
+              </div>
+              <div class="form-group">
+                <label for="compWebsite">Website</label>
+                <input type="text" id="compWebsite" class="form-control" placeholder="www.parekhglobal.com">
+              </div>
+              <div class="form-group">
+                <label for="compPhone">Phone / Tel</label>
+                <input type="text" id="compPhone" class="form-control" placeholder="022-67407500">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. Invoice Header & IRN -->
+        <div class="accordion-item" id="acc-invoice">
+          <div class="accordion-header" onclick="toggleAccordion('acc-invoice')">
+            <span class="title-badge">📄 2. Invoice Meta & IRN</span>
+            <span class="accordion-icon">▼</span>
+          </div>
+          <div class="accordion-body">
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="invNo">Invoice No</label>
+                <input type="text" id="invNo" class="form-control" placeholder="BOMEX17260700399">
+              </div>
+              <div class="form-group">
+                <label for="invDate">Invoice Date</label>
+                <input type="text" id="invDate" class="form-control" placeholder="20-Jul-2026">
+              </div>
+              <div class="form-group">
+                <label for="invCurrency">Invoice Currency</label>
+                <select id="invCurrency" class="form-control">
+                  <option value="USD">USD ($)</option>
+                  <option value="AED">AED (Dhs)</option>
+                  <option value="EUR">EUR (€)</option>
+                  <option value="INR">INR (₹)</option>
+                  <option value="GBP">GBP (£)</option>
+                </select>
+              </div>
+              <!-- Credit Note References -->
+              <div class="form-group cn-only-field" style="display: none;">
+                <label for="cnOriginalInvNo">Original Invoice No Ref</label>
+                <input type="text" id="cnOriginalInvNo" class="form-control" placeholder="e.g. DVXM/26-27/0001">
+              </div>
+              <div class="form-group cn-only-field" style="display: none;">
+                <label for="cnOriginalInvDate">Original Invoice Date Ref</label>
+                <input type="text" id="cnOriginalInvDate" class="form-control" placeholder="20-Jul-2026">
+              </div>
+              <div class="form-group">
+                <label for="salesPerson">Sales Person</label>
+                <input type="text" id="salesPerson" class="form-control" placeholder="">
+              </div>
+              <div class="form-group">
+                <label for="principal">Principal</label>
+                <input type="text" id="principal" class="form-control" placeholder="ARKAS CONTAINER TRANSPORT S.A.">
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="irnNumber">IRN Number</label>
+              <textarea id="irnNumber" class="form-control" rows="2" placeholder="de2f556545dfed37631cba5cb3948473ba0cb3e78036e623dc2493c690f69c26"></textarea>
+            </div>
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="ackNo">Ack No</label>
+                <input type="text" id="ackNo" class="form-control" placeholder="122610987654321">
+              </div>
+              <div class="form-group">
+                <label for="ackDate">Ack Date</label>
+                <input type="text" id="ackDate" class="form-control" placeholder="20-Jul-2026">
+              </div>
+            </div>
+            <div class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 0.65rem; margin-top: 0.35rem;">
+              <label for="qrCodeFile">Official e-Invoice QR Code (Upload Image File or Paste Signed JWT)</label>
+              <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.35rem;">
+                <input type="file" id="qrCodeFile" class="form-control" accept="image/*" style="font-size: 0.75rem; padding: 0.25rem;">
+                <button type="button" id="btnRemoveQR" class="btn btn-danger btn-sm" title="Clear QR Code">Clear</button>
+              </div>
+              <textarea id="qrCodePayload" class="form-control" rows="2" placeholder="Or paste raw e-Invoice Signed QR String / JWT payload from NIC..."></textarea>
+              <span style="font-size: 0.7rem; color: var(--text-muted); display: block; margin-top: 0.2rem;">
+                💡 <strong>Tip for 100% Verification:</strong> Upload the official Signed QR image file (`.png`/`.jpg`) directly downloaded from NIC e-Invoice Portal/Tally/ClearTax so Govt verification apps scan it successfully!
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Parties Details (Bill To, Booking Party, Shipper) -->
+        <div class="accordion-item" id="acc-parties">
+          <div class="accordion-header" onclick="toggleAccordion('acc-parties')">
+            <span class="title-badge">👥 3. Bill To / Party Details</span>
+            <span class="accordion-icon">▼</span>
+          </div>
+          <div class="accordion-body">
+            <div class="form-group">
+              <label for="billToName">Bill To Party Name & Code</label>
+              <input type="text" id="billToName" class="form-control" placeholder="JSB CONSULTANTS PRIVATE LIMITED(185185)">
+            </div>
+            <div class="form-group">
+              <label for="billToAddress">Bill To Address</label>
+              <textarea id="billToAddress" class="form-control" rows="2" placeholder="GROUND FLOOR, 1/636, VAISHALI, Iesahibabad Sub Post Office, Sahibabad Industrial Area, Ghaziabad, Uttar Pradesh, 201010"></textarea>
+            </div>
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="billToState">State Code & Name</label>
+                <input type="text" id="billToState" class="form-control" placeholder="09 State Name : Uttar Pradesh">
+              </div>
+              <div class="form-group">
+                <label for="billToGSTIN">GSTN NO</label>
+                <input type="text" id="billToGSTIN" class="form-control" placeholder="09AAGCJ8258C1ZD">
+              </div>
+              <div class="form-group form-grid-full">
+                <label for="billToPAN">PAN NO</label>
+                <input type="text" id="billToPAN" class="form-control" placeholder="AAGCJ8258C">
+              </div>
+            </div>
+            <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 0.5rem 0;">
+            <div class="form-group">
+              <label for="bookingParty">Booking Party</label>
+              <textarea id="bookingParty" class="form-control" rows="2" placeholder="JSB CONSULTANTS PRIVATE LIMITED GROUND FLOOR 1/636 VAISHALI Sahibabad Industrial Area Ghaziabad 201010"></textarea>
+            </div>
+            <div class="form-group">
+              <label for="shipperName">Shipper</label>
+              <input type="text" id="shipperName" class="form-control" placeholder="IFF INDIA FROZEN FOODS PRIVATE LIMITED">
+            </div>
+            <div class="form-group">
+              <label for="shipperRef">Shipper Reference No.</label>
+              <input type="text" id="shipperRef" class="form-control" placeholder="REF/2026/09871">
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. Shipment & Container Details -->
+        <div class="accordion-item" id="acc-shipment">
+          <div class="accordion-header" onclick="toggleAccordion('acc-shipment')">
+            <span class="title-badge">🚢 4. Shipment & Container Details</span>
+            <span class="accordion-icon">▼</span>
+          </div>
+          <div class="accordion-body">
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="vessel">Vessel</label>
+                <input type="text" id="vessel" class="form-control" placeholder="VIVIEN A">
+              </div>
+              <div class="form-group">
+                <label for="voyageNo">Voyage No</label>
+                <input type="text" id="voyageNo" class="form-control" placeholder="IMS18W26NSA">
+              </div>
+              <div class="form-group">
+                <label for="blNo">B/L No</label>
+                <input type="text" id="blNo" class="form-control" placeholder="NSA065014708">
+              </div>
+              <div class="form-group">
+                <label for="dateOfSupply">Date of Supply</label>
+                <input type="text" id="dateOfSupply" class="form-control" placeholder="17-Jul-2026">
+              </div>
+              <div class="form-group">
+                <label for="placeOfSupply">Place of Supply</label>
+                <input type="text" id="placeOfSupply" class="form-control" placeholder="09 / Uttar Pradesh">
+              </div>
+              <div class="form-group">
+                <label for="dateOfSailing">Date Of Sailing</label>
+                <input type="text" id="dateOfSailing" class="form-control" placeholder="17-Jul-2026">
+              </div>
+              <div class="form-group">
+                <label for="pol">Port Of Loading</label>
+                <input type="text" id="pol" class="form-control" placeholder="NHAVA SHEVA">
+              </div>
+              <div class="form-group">
+                <label for="pod">Port Of Discharge</label>
+                <input type="text" id="pod" class="form-control" placeholder="POTI">
+              </div>
+              <div class="form-group">
+                <label for="placeOfDelivery">Place Of Delivery</label>
+                <input type="text" id="placeOfDelivery" class="form-control" placeholder="POTI">
+              </div>
+              <div class="form-group">
+                <label for="placeOfReceipt">Place Of Receipt</label>
+                <input type="text" id="placeOfReceipt" class="form-control" placeholder="NHAVA SHEVA">
+              </div>
+              <div class="form-group form-grid-full">
+                <label for="invoiceType">Invoice Type</label>
+                <input type="text" id="invoiceType" class="form-control" placeholder="Original for recipient">
+              </div>
+            </div>
+            <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 0.5rem 0;">
+            <div class="form-group">
+              <label for="remarks">Remarks</label>
+              <input type="text" id="remarks" class="form-control" placeholder="">
+            </div>
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="noOfContainers">No Of Containers</label>
+                <input type="text" id="noOfContainers" class="form-control" placeholder="3X40">
+              </div>
+              <div class="form-group form-grid-full">
+                <label for="containerNos">Container No's</label>
+                <input type="text" id="containerNos" class="form-control" placeholder="ARKU5012788, ARKU5026288, ARKU5008920">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. Line Items Table -->
+        <div class="accordion-item" id="acc-items">
+          <div class="accordion-header" onclick="toggleAccordion('acc-items')">
+            <span class="title-badge">💰 5. Line Items & Tax Rates</span>
+            <span class="accordion-icon">▼</span>
+          </div>
+          <div class="accordion-body">
+            <div id="itemsContainer" class="items-form-list">
+              <!-- Item cards will be dynamically added here -->
+            </div>
+            <button id="btnAddItem" class="btn btn-secondary" style="margin-top: 0.5rem; justify-content: center;">➕ Add Charge Line Item</button>
+          </div>
+        </div>
+
+        <!-- 6. Bank Account & Signatory Footer -->
+        <div class="accordion-item" id="acc-bank">
+          <div class="accordion-header" onclick="toggleAccordion('acc-bank')">
+            <span class="title-badge">🏦 6. Bank Details & Footer</span>
+            <span class="accordion-icon">▼</span>
+          </div>
+          <div class="accordion-body">
+            <div class="form-group">
+              <label for="beneficiaryName">Beneficiary Name</label>
+              <input type="text" id="beneficiaryName" class="form-control" placeholder="PAREKH MARINE SERVICES PRIVATE LIMITED A/C ARKAS LINE">
+            </div>
+            <div class="form-group">
+              <label for="bankNameAddress">Bank Name and Address</label>
+              <input type="text" id="bankNameAddress" class="form-control" placeholder="HDFC BANK LTD, GROUND FLOOR, JEHANGIR BLDG., M G ROAD, FORT, MUMBAI 400001">
+            </div>
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="bankAccNo">Bank Acc No</label>
+                <input type="text" id="bankAccNo" class="form-control" placeholder="PARM62DEL">
+              </div>
+              <div class="form-group">
+                <label for="accountType">Account Type</label>
+                <input type="text" id="accountType" class="form-control" placeholder="CURRENT">
+              </div>
+              <div class="form-group">
+                <label for="micrCode">MICR Code</label>
+                <input type="text" id="micrCode" class="form-control" placeholder="400240015">
+              </div>
+              <div class="form-group">
+                <label for="rtgsIfsc">RTGS IFSC Code</label>
+                <input type="text" id="rtgsIfsc" class="form-control" placeholder="HDFC0000240">
+              </div>
+              <div class="form-group form-grid-full">
+                <label for="neftIfsc">NEFT IFSC Code</label>
+                <input type="text" id="neftIfsc" class="form-control" placeholder="HDFC0000240">
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="preparedBy">Prepared By Label</label>
+              <input type="text" id="preparedBy" class="form-control" placeholder="Internal Auditor Login">
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </aside>
+
+    <!-- RIGHT PANEL: LIVE A4 PRINTABLE INVOICE PREVIEW -->
+    <main class="preview-panel">
+      
+      <!-- A4 Sheet Container -->
+      <div class="a4-wrapper">
+        <div class="invoice-doc" id="invoiceDocument">
+          
+          <!-- Document Header -->
+          <div class="inv-header">
+            <div class="inv-logo-box">
+              <img id="viewLogo" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%230284c7'/><path d='M20 50 Q 35 20, 50 50 T 80 50' stroke='white' stroke-width='6' fill='none'/></svg>" alt="Company Logo">
+            </div>
+            <div class="inv-company-details">
+              <div class="inv-company-name" id="viewCompName">PAREKH MARINE SERVICES PRIVATE LIMITED</div>
+              <div class="inv-company-address" id="viewCompAddress">Anchorage, CTS-275/B Village Deonar, Off. Govandi Station Rd, Govandi (E), Mumbai, Mumbai City, Maharashtra, India, 400088</div>
+              <div class="inv-company-taxinfo" id="viewCompTaxInfo">
+                <!-- Rendered dynamically depending on company profile -->
+              </div>
+            </div>
+            <div class="inv-qr-box" id="viewQRContainer">
+              <img id="viewQRImg" src="" alt="e-Invoice QR Code" style="display: none; width: 95px; height: 95px; object-fit: contain;">
+            </div>
+          </div>
+
+          <!-- Document Title & IRN -->
+          <div class="inv-title" id="viewDocTitle">TAX INVOICE</div>
+          <div class="inv-irn-bar" id="viewIRNBar">
+            IRN : <span id="viewIRN">de2f556545dfed37631cba5cb3948473ba0cb3e78036e623dc2493c690f69c26</span>
+            <span id="viewAckBlock" style="margin-left: 0.75rem;">
+              | Ack No : <span id="viewAckNo">122610987654321</span> | Ack Date : <span id="viewAckDate">20-Jul-2026</span>
+            </span>
+          </div>
+          <div class="cn-reference-bar" id="viewCNReferenceBar" style="display: none; background: #f3f4f6; color: #000; text-align: center; font-size: 0.75rem; font-weight: 600; padding: 4px; border-bottom: 1px solid #000; border-top: 1px solid #000; letter-spacing: 0.05em;">
+            ORIGINAL INVOICE REF: NO. <span id="viewCNOriginalInvNo">-</span> DATED <span id="viewCNOriginalInvDate">-</span>
+          </div>
+
+          <!-- 2-Column Parties & Invoice Meta Grid -->
+          <div class="inv-grid-2col">
+            <div class="inv-grid-left">
+              <div class="party-block">
+                <strong>BILL TO :</strong><span class="party-name" id="viewBillToName">JSB CONSULTANTS PRIVATE LIMITED(185185)</span><br>
+                <span class="party-sub" id="viewBillToAddress">GROUND FLOOR, 1/636, VAISHALI, Iesahibabad Sub Post Office, Sahibabad Industrial Area, Ghaziabad, Uttar Pradesh, 201010</span><br>
+                <span class="party-sub" id="viewBillToState">State Code : 09 State Name : Uttar Pradesh</span><br>
+                <strong>GSTN NO:</strong> <span id="viewBillToGSTIN">09AAGCJ8258C1ZD</span><br>
+                <strong>PAN NO:</strong> <span id="viewBillToPAN">AAGCJ8258C</span>
+              </div>
+              <hr style="border:0; border-top: 1px solid #000; margin: 3px 0;">
+              <div class="party-block">
+                <strong>Booking Party :</strong> <span id="viewBookingParty">JSB CONSULTANTS PRIVATE LIMITED GROUND FLOOR 1/636 VAISHALI Iesahibabad Sub Post Office Sahibabad Industrial Area Ghaziabad Ghaziabad Uttar Pradesh 201010</span>
+              </div>
+              <div class="party-block">
+                <strong>Shipper :</strong> <span id="viewShipper">IFF INDIA FROZEN FOODS PRIVATE LIMITED</span>
+              </div>
+              <div class="party-block" id="viewShipperRefBlock">
+                <strong>Shipper Ref No :</strong> <span id="viewShipperRef"></span>
+              </div>
+            </div>
+            <div class="inv-grid-right">
+              <table class="kv-table">
+                <tr>
+                  <td class="kv-label">Invoice No</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewInvNo">BOMEX17260700399</td>
+                </tr>
+                <tr>
+                  <td class="kv-label">Invoice Date</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewInvDate">20-Jul-2026</td>
+                </tr>
+                <tr>
+                  <td class="kv-label">Sales Person</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewSalesPerson"></td>
+                </tr>
+                <tr>
+                  <td class="kv-label">Principal</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewPrincipal">ARKAS CONTAINER TRANSPORT S.A.</td>
+                </tr>
+              </table>
+            </div>
+          </div>
+
+          <!-- Vessel & Shipment Details Grid -->
+          <div class="inv-grid-2col">
+            <div class="inv-grid-left">
+              <table class="kv-table">
+                <tr>
+                  <td class="kv-label">Vessel</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewVessel">VIVIEN A</td>
+                </tr>
+                <tr>
+                  <td class="kv-label">Voyage No</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewVoyage">IMS18W26NSA</td>
+                </tr>
+                <tr>
+                  <td class="kv-label">B/L No</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewBLNo">NSA065014708</td>
+                </tr>
+                <tr>
+                  <td class="kv-label">Date of Supply</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewDateOfSupply">17-Jul-2026</td>
+                </tr>
+                <tr>
+                  <td class="kv-label" id="lblViewPlaceOfSupply">Place of Supply</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewPlaceOfSupply">09 / Uttar Pradesh</td>
+                </tr>
+                <tr>
+                  <td class="kv-label">Date Of Sailing</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewDateOfSailing">17-Jul-2026</td>
+                </tr>
+              </table>
+            </div>
+            <div class="inv-grid-right">
+              <table class="kv-table">
+                <tr>
+                  <td class="kv-label">Port Of Loading</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewPOL">NHAVA SHEVA</td>
+                </tr>
+                <tr>
+                  <td class="kv-label">Port Of Discharge</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewPOD">POTI</td>
+                </tr>
+                <tr>
+                  <td class="kv-label">Place Of Delivery</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewPlaceOfDelivery">POTI</td>
+                </tr>
+                <tr>
+                  <td class="kv-label">Place Of Receipt</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewPlaceOfReceipt">NHAVA SHEVA</td>
+                </tr>
+                <tr>
+                  <td class="kv-label">Invoice Type</td>
+                  <td class="kv-sep">:</td>
+                  <td class="kv-val" id="viewInvoiceType">Original for recipient</td>
+                </tr>
+              </table>
+            </div>
+          </div>
+
+          <!-- Remarks & Containers Bar -->
+          <div class="inv-remarks-block">
+            <table class="kv-table">
+              <tr>
+                <td class="kv-label" style="width: 120px;">Remarks</td>
+                <td class="kv-sep">:</td>
+                <td class="kv-val" id="viewRemarks"></td>
+              </tr>
+              <tr>
+                <td class="kv-label">No Of Containers</td>
+                <td class="kv-sep">:</td>
+                <td class="kv-val" id="viewNoOfContainers">3X40</td>
+              </tr>
+              <tr>
+                <td class="kv-label">Container No's</td>
+                <td class="kv-sep">:</td>
+                <td class="kv-val" id="viewContainerNos">ARKU5012788, ARKU5026288, ARKU5008920</td>
+              </tr>
+            </table>
+          </div>
+
+          <!-- Line Items Table -->
+          <table class="inv-items-table">
+            <thead>
+              <tr>
+                <th style="width: 25%;">Description</th>
+                <th style="width: 8%;">SAC / HSN</th>
+                <th style="width: 8%;">Cntr Type</th>
+                <th style="width: 5%;">Qty</th>
+                <th style="width: 5%;">Cur</th>
+                <th style="width: 10%;">Amount Per Cntr</th>
+                <th class="exrate-col" style="width: 6%;">Ex Rate</th>
+                <th class="taxable-col" id="thTaxable" style="width: 11%;">Taxable Amount in INR</th>
+                <th class="gst-col" style="width: 6%;">IGST RATE</th>
+                <th class="gst-col" style="width: 8%;">IGST</th>
+                <th id="thTotalAmount" style="width: 13%;">Amount In INR</th>
+              </tr>
+            </thead>
+            <tbody id="viewItemsBody">
+              <!-- Rendered dynamically -->
+            </tbody>
+          </table>
+
+          <!-- Totals Bar -->
+          <div class="inv-totals-row">
+            <div class="inv-totals-words">
+              <strong>Total :&nbsp;</strong><span id="viewTotalInWords">ONE HUNDRED AND THIRTEEN THOUSAND EIGHT HUNDRED AND EIGHTY ONE AND EIGHTY PAISE ONLY.</span>
+            </div>
+            <div class="inv-total-cell" id="viewTotalTaxable">96,510.00</div>
+            <div class="inv-total-cell" id="viewTotalIGST">17,371.80</div>
+            <div class="inv-total-cell" id="viewTotalGrand">113,881.80</div>
+          </div>
+
+          <!-- Footer Block -->
+          <div class="inv-footer-section">
+            <div class="inv-bank-grid" id="viewBankDetailsBlock">
+              <!-- Rendered dynamically depending on company profile -->
+            </div>
+
+            <div class="inv-disclaimer-grid">
+              <div class="inv-terms">
+                Interest @ 18% will be levied on Outstanding amount after the Due Date.<br>
+                In case of any discrepancy on above invoice amount, please notify within 5 days. If not this invoice will be presumed to be in order.<br>
+                <strong>PAN No :</strong> <span id="viewFooterPAN">AAJCP0051C</span>
+              </div>
+              <div class="inv-signature-block">
+                <div>
+                  <div class="inv-cheque-note">Please issue the cheque in favour of <span id="viewChequeFav">Parekh Marine Services Private Limited</span></div>
+                  <div class="inv-for-company">For <span id="viewForCompany">Parekh Marine Services Private Limited</span></div>
+                </div>
+                <div>
+                  <div class="inv-auth-sig">Authorised Signatory</div>
+                  <div class="inv-prep-by">Prepared By : <span id="viewPreparedBy">Internal Auditor Login</span></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="inv-sys-gen">THIS IS SYSTEM GENERATED DOCUMENT,STAMP AND SIGNATURE IS NOT REQUIRED</div>
+            <div class="inv-reg-office">
+              Registered Office : <span id="viewRegOffice">Anchorage, CTS-275/B, Village Deonar,Govandi(E), Mumbai, Maharashtra, India, 400088 Tel 022-67407500 visit us at www.parekhgroup.in</span>
+            </div>
+
+          </div>
+
+        </div>
+      </div>
+
+    </main>
+
+  </div>
+
+  <!-- TABULAR MASTER SHEET DATABASE MODAL -->
+  <div id="dbModal" class="modal-overlay" style="display: none;">
+    <div class="modal-content modal-lg">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 0.75rem;">
+          <span style="font-size: 1.5rem;">📊</span>
+          <div>
+            <h3 style="margin: 0; font-size: 1.15rem;">Master Database Sheet & Financial Analytics</h3>
+            <p style="margin: 0; font-size: 0.75rem; color: var(--text-muted);">Manage, filter, search, and export all saved invoices to Excel & Tally Prime</p>
+          </div>
+        </div>
+        <button id="btnCloseDBModal" class="btn btn-danger btn-sm">✖ Close</button>
+      </div>
+      
+      <div class="modal-body">
+        
+        <!-- Summary KPI Cards -->
+        <div class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-title">TOTAL INVOICES</div>
+            <div class="kpi-value" id="kpiTotalCount">0</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-title">TOTAL TAXABLE VALUE</div>
+            <div class="kpi-value text-accent" id="kpiTotalTaxable">₹0.00</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-title">TOTAL IGST TAX</div>
+            <div class="kpi-value text-warning" id="kpiTotalIGST">₹0.00</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-title">TOTAL GRAND REVENUE</div>
+            <div class="kpi-value text-success" id="kpiTotalRevenue">₹0.00</div>
+          </div>
+        </div>
+
+        <!-- Filter & Search Controls Toolbar -->
+        <div class="master-toolbar">
+          <div class="filter-controls-grid">
+            <div class="form-group mb-0">
+              <label style="font-size: 0.7rem;">🔍 Search Query</label>
+              <input type="text" id="dbSearchInput" class="form-control" placeholder="Inv No, Customer, Vessel, B/L, GSTIN...">
+            </div>
+            <div class="form-group mb-0">
+              <label style="font-size: 0.7rem;">📅 Date From</label>
+              <input type="date" id="filterDateFrom" class="form-control">
+            </div>
+            <div class="form-group mb-0">
+              <label style="font-size: 0.7rem;">📅 Date To</label>
+              <input type="date" id="filterDateTo" class="form-control">
+            </div>
+            <div class="form-group mb-0">
+              <label style="font-size: 0.7rem;">🏢 Company Profile</label>
+              <select id="filterCompany" class="btn-select">
+                <option value="ALL">All Companies</option>
+              </select>
+            </div>
+            <div class="form-group mb-0">
+              <label style="font-size: 0.7rem;">⚡ IRN Status</label>
+              <select id="filterIRNStatus" class="btn-select">
+                <option value="ALL">All Statuses</option>
+                <option value="GENERATED">IRN Generated</option>
+                <option value="PENDING">Pending IRN</option>
+              </select>
+            </div>
+            <div class="form-group mb-0" style="align-self: flex-end;">
+              <button id="btnResetFilters" class="btn btn-secondary btn-sm" style="width: 100%;">↺ Reset Filters</button>
+            </div>
+          </div>
+
+          <!-- Export & Action Buttons -->
+          <div class="export-actions-bar">
+            <div style="font-size: 0.8rem; color: var(--text-muted); font-weight: 500;">
+              Showing <span id="masterFilteredCount">0</span> of <span id="masterTotalCount">0</span> records
+            </div>
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+              <button id="btnBulkEInvoice" class="btn btn-accent" title="Generate E-Invoice (IRN & QR) for all pending invoices in database">⚡ Bulk E-Invoice Pending (<span id="bulkPendingCount">0</span>)</button>
+              <button id="btnExportMasterExcel" class="btn btn-success" title="Export all / filtered invoices to Excel spreadsheet (.xlsx)">📊 Export to Excel (.xlsx)</button>
+              <button id="btnExportMasterCSV" class="btn btn-secondary" title="Export to CSV file">📄 Export CSV</button>
+              <button id="btnExportMasterTallyXML" class="btn btn-primary" title="Export all filtered invoices to Tally Prime / Edit Log XML format">🟢 Export Tally Prime XML</button>
+              <button id="btnImportMasterPDF" class="btn btn-secondary" title="Extract and import old PDF invoice files directly into database">📄 Import PDF Invoice(s)</button>
+              <button id="btnExportJsonDB" class="btn btn-secondary" title="Save / Backup entire invoice database as a JSON file in your local folder">💾 Backup DB File (.json)</button>
+              <button id="btnImportJsonDB" class="btn btn-secondary" title="Open / Load invoice database JSON file from your local folder">📂 Open DB File (.json)</button>
+              <input type="file" id="importJsonFileInput" accept=".json" style="display: none;">
+              <input type="file" id="pdfFileInput" accept=".pdf" multiple style="display: none;">
+              <button id="btnDeleteSelectedDB" class="btn btn-danger btn-sm" title="Delete selected invoices from database">🗑️ Delete Selected</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Master Sheet Excel-Like Table -->
+        <div class="db-table-wrapper">
+          <table class="db-table master-sheet-table">
+            <thead>
+              <tr>
+                <th style="width: 35px; text-align: center;">
+                  <input type="checkbox" id="chkSelectAllMaster" title="Select / Deselect All">
+                </th>
+                <th>Invoice No</th>
+                <th>Date</th>
+                <th>Seller Company</th>
+                <th>Bill To / Customer</th>
+                <th>Customer GSTIN</th>
+                <th>Vessel / B/L No</th>
+                <th class="text-right">Taxable Amt</th>
+                <th class="text-right">IGST Amt</th>
+                <th class="text-right">Grand Total</th>
+                <th>IRN Status</th>
+                <th style="text-align: center;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="dbTableBody">
+              <!-- Rendered dynamically -->
+            </tbody>
+          </table>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- E-INVOICING API CONSOLE MODAL -->
+  <div id="eInvModal" class="modal-overlay" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 0.75rem;">
+          <span style="font-size: 1.5rem;">⚡</span>
+          <div>
+            <h3 style="margin: 0; font-size: 1.15rem;">E-Invoicing NIC API Integration (Schema v1.04)</h3>
+            <p style="margin: 0; font-size: 0.75rem; color: var(--text-muted);">Test API sandbox environment & live server IRN generation configuration</p>
+          </div>
+        </div>
+        <button id="btnCloseEInvModal" class="btn btn-danger btn-sm">✖ Close</button>
+      </div>
+
+      <div class="modal-body">
+        
+        <!-- Environment Switcher -->
+        <div class="env-switcher-card">
+          <label style="font-weight: 600; font-size: 0.85rem; display: block; margin-bottom: 0.5rem;">Select Server Environment:</label>
+          <div style="display: flex; gap: 1.5rem; align-items: center;">
+            <label class="env-radio-label">
+              <input type="radio" name="envMode" id="envModeTest" value="TEST" checked>
+              <span>🧪 Test Server (NIC Sandbox API)</span>
+            </label>
+            <label class="env-radio-label">
+              <input type="radio" name="envMode" id="envModeLive" value="LIVE">
+              <span>🚀 Main Production Server (NIC Live API)</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Credentials & API Configuration -->
+        <div class="accordion-item collapsed" id="acc-einv-config" style="margin-top: 0.75rem;">
+          <div class="accordion-header" onclick="toggleAccordion('acc-einv-config')">
+            <span class="title-badge">🔐 NIC API Credentials Settings</span>
+            <span class="accordion-icon">▼</span>
+          </div>
+          <div class="accordion-body">
+            <div class="form-grid">
+              <div class="form-group">
+                <label>GSP Client ID</label>
+                <input type="text" id="einvClientId" class="form-control" value="TEST_GSP_CLIENT_8812" placeholder="GSP Client ID">
+              </div>
+              <div class="form-group">
+                <label>GSP Client Secret</label>
+                <input type="password" id="einvClientSecret" class="form-control" value="secret_test_key_99" placeholder="GSP Client Secret">
+              </div>
+              <div class="form-group">
+                <label>E-Invoice User ID / Username</label>
+                <input type="text" id="einvUsername" class="form-control" value="parekh_marine_user" placeholder="E-Invoice Portal Username">
+              </div>
+              <div class="form-group">
+                <label>E-Invoice Password</label>
+                <input type="password" id="einvPassword" class="form-control" value="Pass@1234" placeholder="E-Invoice Portal Password">
+              </div>
+            </div>
+            <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem;">
+              * Note: Test API Sandbox credentials are pre-configured for instant simulation. Switch to Live mode for production deployment.
+            </div>
+          </div>
+        </div>
+
+        <!-- Target Invoice Card -->
+        <div class="target-inv-card">
+          <h4>Invoice Selected for E-Invoicing:</h4>
+          <div style="display: flex; justify-content: space-between; flex-wrap: wrap; margin-top: 0.5rem; font-size: 0.85rem;">
+            <div><strong>Invoice No:</strong> <span id="einvTargetInvNo">--</span></div>
+            <div><strong>Date:</strong> <span id="einvTargetDate">--</span></div>
+            <div><strong>Customer GSTIN:</strong> <span id="einvTargetGSTIN">--</span></div>
+            <div><strong>Grand Total:</strong> ₹<span id="einvTargetTotal">0.00</span></div>
+          </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem;">
+          <button id="btnTestAuthAPI" class="btn btn-secondary">🔑 Test Auth Token</button>
+          <button id="btnGenerateIRNAPI" class="btn btn-success">🚀 Generate IRN via Test API</button>
+          <button id="btnViewNICPayload" class="btn btn-primary">👁️ Inspect NIC JSON Payload</button>
+          <button id="btnCancelIRNAPI" class="btn btn-danger">❌ Cancel IRN</button>
+        </div>
+
+        <!-- Response & Payload Display Box -->
+        <div style="margin-top: 1rem;">
+          <label style="font-size: 0.8rem; font-weight: 600;">API Logs & NIC JSON Schema Output:</label>
+          <pre id="einvLogsBox" class="json-preview-box">Select an action above to test authentication or generate IRN payload...</pre>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
