@@ -6,22 +6,22 @@
 
 const DEFAULT_LOGO = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%230284c7'/><path d='M20 50 Q 35 20, 50 50 T 80 50' stroke='white' stroke-width='6' fill='none'/></svg>";
 
-// --- MULTI-DEVICE EMAIL CLOUD SYNC ENGINE (No Firebase / CORS-free Cloud Store) ---
+// --- MULTI-DEVICE EMAIL CLOUD SYNC ENGINE ---
 let currentSyncUserEmail = localStorage.getItem("devx_sync_email") || "";
 let cloudSyncTimer = null;
 
-// Get a clean cloud bin key from the user's email address
+// Get a clean cloud storage key from the user's email address or sync key
 function getCloudStorageKey(email) {
   if (!email) return "";
-  const cleanEmail = email.toLowerCase().trim();
+  const clean = email.toLowerCase().trim();
   let hash = 0;
-  for (let i = 0; i < cleanEmail.length; i++) {
-    hash = ((hash << 5) - hash) + cleanEmail.charCodeAt(i);
+  for (let i = 0; i < clean.length; i++) {
+    hash = ((hash << 5) - hash) + clean.charCodeAt(i);
     hash |= 0;
   }
-  const positiveHash = Math.abs(hash).toString(36);
-  const safeName = cleanEmail.replace(/[^a-z0-9]/g, '');
-  return `devx_sync_${safeName.substring(0, 15)}_${positiveHash}`;
+  const posHash = Math.abs(hash).toString(36);
+  const safeName = clean.replace(/[^a-z0-9]/g, '').substring(0, 12);
+  return `devx_${safeName}_${posHash}`;
 }
 
 // Fetch invoices from cloud REST storage for current email
@@ -30,22 +30,9 @@ async function fetchCloudDB(email) {
   const storageKey = getCloudStorageKey(email);
   if (!storageKey) return null;
 
-  try {
-    const res = await fetch(`https://api.npoint.io/${storageKey}`);
-    if (res.ok) {
-      const data = await res.json();
-      if (data && typeof data === 'object' && !Array.isArray(data)) {
-        return data;
-      }
-    }
-  } catch (err) {
-    console.warn("Cloud Sync Fetch Warning:", err);
-  }
-
-  // Fallback to secondary jsonblob cloud store
-  try {
-    const storedBlobId = localStorage.getItem("devx_blob_" + storageKey);
-    if (storedBlobId) {
+  const storedBlobId = localStorage.getItem("devx_blob_" + storageKey);
+  if (storedBlobId) {
+    try {
       const res = await fetch(`https://jsonblob.com/api/jsonBlob/${storedBlobId}`);
       if (res.ok) {
         const data = await res.json();
@@ -53,8 +40,10 @@ async function fetchCloudDB(email) {
           return data;
         }
       }
+    } catch (err) {
+      console.warn("Cloud Sync Fetch Warning:", err);
     }
-  } catch (e) {}
+  }
 
   return null;
 }
@@ -65,39 +54,41 @@ async function pushCloudDB(email, dbData) {
   const storageKey = getCloudStorageKey(email);
   if (!storageKey) return false;
 
+  let storedBlobId = localStorage.getItem("devx_blob_" + storageKey);
+
+  if (storedBlobId) {
+    try {
+      const res = await fetch(`https://jsonblob.com/api/jsonBlob/${storedBlobId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify(dbData)
+      });
+      if (res.ok) return true;
+    } catch (e) {}
+  }
+
+  // Create new blob if not existing
   try {
-    await fetch(`https://api.npoint.io/${storageKey}`, {
+    const res = await fetch(`https://jsonblob.com/api/jsonBlob`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify(dbData)
     });
-  } catch (e) {}
-
-  try {
-    let storedBlobId = localStorage.getItem("devx_blob_" + storageKey);
-    if (storedBlobId) {
-      await fetch(`https://jsonblob.com/api/jsonBlob/${storedBlobId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(dbData)
-      });
-    } else {
-      const res = await fetch(`https://jsonblob.com/api/jsonBlob`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(dbData)
-      });
-      if (res.ok) {
-        const location = res.headers.get("Location");
-        if (location) {
-          const blobId = location.split("/").pop();
+    if (res.ok) {
+      let location = res.headers.get("Location") || res.headers.get("location");
+      if (location) {
+        const blobId = location.split("/").pop();
+        if (blobId && blobId !== "jsonBlob") {
           localStorage.setItem("devx_blob_" + storageKey, blobId);
+          return true;
         }
       }
     }
-  } catch (e) {}
+  } catch (e) {
+    console.warn("Cloud push error:", e);
+  }
 
-  return true;
+  return false;
 }
 
 function updateCloudSyncUI() {
@@ -186,11 +177,11 @@ function startCloudSyncTimer() {
   if (cloudSyncTimer) clearInterval(cloudSyncTimer);
   if (!currentSyncUserEmail) return;
 
-  // Poll cloud database every 12 seconds
+  // Poll cloud database every 30 seconds only when tab is active
   cloudSyncTimer = setInterval(async () => {
-    if (!currentSyncUserEmail) return;
+    if (!currentSyncUserEmail || document.hidden) return;
     const remoteData = await fetchCloudDB(currentSyncUserEmail);
-    if (remoteData && typeof remoteData === 'object') {
+    if (remoteData && typeof remoteData === 'object' && Object.keys(remoteData).length > 0) {
       const localStr = JSON.stringify(localDatabaseInMemory);
       const remoteStr = JSON.stringify(remoteData);
       if (localStr !== remoteStr) {
@@ -203,7 +194,7 @@ function startCloudSyncTimer() {
         console.log("Background cloud invoice database update pulled successfully!");
       }
     }
-  }, 12000);
+  }, 30000);
 }
 
 // --- PRESET COMPANY DATA ---
@@ -1396,22 +1387,24 @@ async function loadDBFromServer() {
     }
   }
 
-  // 2. Fallback to local server API
-  try {
-    const res = await fetch(`${SERVER_API_URL}/load-db`);
-    if (res.ok) {
-      const data = await res.json();
-      if (data && typeof data === 'object' && !Array.isArray(data)) {
-        localDatabaseInMemory = data;
-        localStorage.setItem("devx_invoice_db", JSON.stringify(data));
-        updateDBBadgeCount();
-        if (typeof renderInvoiceDBList === 'function') renderInvoiceDBList();
-        console.log("Database successfully synced from invoices_database.json!");
-        return;
+  // 2. Fallback to local server API (ONLY when running on localhost)
+  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+    try {
+      const res = await fetch(`${SERVER_API_URL}/load-db`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && typeof data === 'object' && !Array.isArray(data)) {
+          localDatabaseInMemory = data;
+          localStorage.setItem("devx_invoice_db", JSON.stringify(data));
+          updateDBBadgeCount();
+          if (typeof renderInvoiceDBList === 'function') renderInvoiceDBList();
+          console.log("Database successfully synced from invoices_database.json!");
+          return;
+        }
       }
+    } catch (err) {
+      console.warn("Server API not available. Using offline localStorage database:", err);
     }
-  } catch (err) {
-    console.warn("Server API not available. Using offline localStorage database:", err);
   }
   
   // 3. Fallback to localStorage
@@ -1434,16 +1427,18 @@ async function saveDBToServer(localDB) {
     }
   }
 
-  // 2. Fallback write to local server API
-  try {
-    await fetch(`${SERVER_API_URL}/save-db`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(localDB, null, 2)
-    });
-    console.log("Database successfully saved to invoices_database.json!");
-  } catch (err) {
-    console.warn("Failed to write to invoices_database.json on disk (Server offline):", err);
+  // 2. Fallback write to local server API (ONLY when running on localhost)
+  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+    try {
+      await fetch(`${SERVER_API_URL}/save-db`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(localDB, null, 2)
+      });
+      console.log("Database successfully saved to invoices_database.json!");
+    } catch (err) {
+      console.warn("Failed to write to invoices_database.json on disk (Server offline):", err);
+    }
   }
 }
 

@@ -844,12 +844,12 @@
 
       <div class="modal-body">
         <div style="background: rgba(2, 132, 199, 0.1); border-left: 3px solid #0284c7; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem; font-size: 0.8rem; color: var(--text-color);">
-          💡 <strong>How it works:</strong> Enter your Email ID below. Any invoice you create or edit will instantly sync to the cloud under your email address so it appears on all your computers!
+          💡 <strong>How it works:</strong> Enter your Email ID or Sync Key below. Any invoice you create or edit will instantly sync across all your computers and devices!
         </div>
 
         <div class="form-group">
-          <label style="font-weight: 600; font-size: 0.85rem;">Enter Your Email Address:</label>
-          <input type="email" id="syncUserEmailInput" class="form-control" placeholder="e.g. sanjeev@jsbcargo.com" style="margin-top: 0.35rem;">
+          <label style="font-weight: 600; font-size: 0.85rem;">Enter Email ID or Sync Key:</label>
+          <input type="text" id="syncUserEmailInput" class="form-control" placeholder="e.g. sanjeev@jsbcargo.com or Sync Key..." style="margin-top: 0.35rem;">
         </div>
 
         <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
@@ -858,7 +858,7 @@
         </div>
 
         <div id="syncStatusMsg" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.75rem; text-align: center;">
-          Current Status: Disconnected
+          Current Status: Disconnected (Local Storage Only)
         </div>
       </div>
     </div>
