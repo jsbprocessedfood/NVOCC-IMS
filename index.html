@@ -844,17 +844,29 @@
 
       <div class="modal-body">
         <div style="background: rgba(2, 132, 199, 0.1); border-left: 3px solid #0284c7; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem; font-size: 0.8rem; color: var(--text-color);">
-          💡 <strong>How it works:</strong> Enter your Email ID or Sync Key below. Any invoice you create or edit will instantly sync across all your computers and devices!
+          💡 <strong>Multi-Device Live Sync:</strong> Enter your Email ID or Sync Key below. To connect another computer, simply paste your <strong>Sync Key</strong> on the second machine!
         </div>
 
         <div class="form-group">
-          <label style="font-weight: 600; font-size: 0.85rem;">Enter Email ID or Sync Key:</label>
+          <label style="font-weight: 600; font-size: 0.85rem;">Enter Email Address or Sync Key:</label>
           <input type="text" id="syncUserEmailInput" class="form-control" placeholder="e.g. sanjeev@jsbcargo.com or Sync Key..." style="margin-top: 0.35rem;">
         </div>
 
         <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
           <button id="btnConnectSyncEmail" class="btn btn-primary" style="flex: 1;">🚀 Connect & Sync Invoices</button>
           <button id="btnDisconnectSyncEmail" class="btn btn-danger" style="display: none;">Logout</button>
+        </div>
+
+        <!-- Sync Key Display Box for pairing multiple computers -->
+        <div id="syncKeyContainer" style="display: none; margin-top: 1rem; padding: 0.75rem; background: var(--bg-tertiary, #1e293b); border: 1px solid var(--border-color, #334155); border-radius: 6px;">
+          <div style="font-size: 0.75rem; color: var(--text-muted); font-weight: 600;">🔑 YOUR MULTI-DEVICE SYNC KEY:</div>
+          <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.35rem;">
+            <input type="text" id="syncKeyDisplay" class="form-control" readonly style="font-family: monospace; font-size: 0.85rem; font-weight: bold; color: #0284c7; background: rgba(0,0,0,0.2);">
+            <button id="btnCopySyncKey" class="btn btn-secondary btn-sm" title="Copy Sync Key to Clipboard">📋 Copy Key</button>
+          </div>
+          <p style="margin: 0.35rem 0 0 0; font-size: 0.7rem; color: var(--text-muted);">
+            Paste this Sync Key into <strong>"Sync Account"</strong> on any other computer to instantly pair all your invoices!
+          </p>
         </div>
 
         <div id="syncStatusMsg" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.75rem; text-align: center;">

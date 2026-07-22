@@ -6,89 +6,65 @@
 
 const DEFAULT_LOGO = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%230284c7'/><path d='M20 50 Q 35 20, 50 50 T 80 50' stroke='white' stroke-width='6' fill='none'/></svg>";
 
-// --- MULTI-DEVICE EMAIL CLOUD SYNC ENGINE ---
+// --- MULTI-DEVICE CLOUD SYNC ENGINE ---
 let currentSyncUserEmail = localStorage.getItem("devx_sync_email") || "";
+let currentSyncKey = localStorage.getItem("devx_sync_key") || "";
 let cloudSyncTimer = null;
 
-// Get a clean cloud storage key from the user's email address or sync key
-function getCloudStorageKey(email) {
-  if (!email) return "";
-  const clean = email.toLowerCase().trim();
-  let hash = 0;
-  for (let i = 0; i < clean.length; i++) {
-    hash = ((hash << 5) - hash) + clean.charCodeAt(i);
-    hash |= 0;
-  }
-  const posHash = Math.abs(hash).toString(36);
-  const safeName = clean.replace(/[^a-z0-9]/g, '').substring(0, 12);
-  return `devx_${safeName}_${posHash}`;
-}
-
-// Fetch invoices from cloud REST storage for current email
-async function fetchCloudDB(email) {
-  if (!email) return null;
-  const storageKey = getCloudStorageKey(email);
-  if (!storageKey) return null;
-
-  const storedBlobId = localStorage.getItem("devx_blob_" + storageKey);
-  if (storedBlobId) {
-    try {
-      const res = await fetch(`https://jsonblob.com/api/jsonBlob/${storedBlobId}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data && typeof data === 'object' && !Array.isArray(data)) {
-          return data;
-        }
+// Fetch invoices from cloud REST storage
+async function fetchCloudDB(syncKey) {
+  if (!syncKey) return null;
+  try {
+    const res = await fetch(`https://jsonblob.com/api/jsonBlob/${syncKey}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && typeof data === 'object' && !Array.isArray(data)) {
+        return data;
       }
-    } catch (err) {
-      console.warn("Cloud Sync Fetch Warning:", err);
     }
+  } catch (err) {
+    console.warn("Cloud Sync Fetch Warning:", err);
   }
-
   return null;
 }
 
-// Push local invoices to cloud REST storage for current email
-async function pushCloudDB(email, dbData) {
-  if (!email || !dbData) return false;
-  const storageKey = getCloudStorageKey(email);
-  if (!storageKey) return false;
-
-  let storedBlobId = localStorage.getItem("devx_blob_" + storageKey);
-
-  if (storedBlobId) {
-    try {
-      const res = await fetch(`https://jsonblob.com/api/jsonBlob/${storedBlobId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify(dbData)
-      });
-      if (res.ok) return true;
-    } catch (e) {}
+// Push local invoices to cloud REST storage
+async function pushCloudDB(syncKey, dbData) {
+  if (!syncKey || !dbData) return false;
+  try {
+    const res = await fetch(`https://jsonblob.com/api/jsonBlob/${syncKey}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify(dbData)
+    });
+    if (res.ok) return true;
+  } catch (e) {
+    console.warn("Cloud push error:", e);
   }
+  return false;
+}
 
-  // Create new blob if not existing
+// Create a new cloud database blob on jsonblob.com
+async function createNewCloudBlob(dbData) {
   try {
     const res = await fetch(`https://jsonblob.com/api/jsonBlob`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
-      body: JSON.stringify(dbData)
+      body: JSON.stringify(dbData || {})
     });
     if (res.ok) {
       let location = res.headers.get("Location") || res.headers.get("location");
       if (location) {
         const blobId = location.split("/").pop();
         if (blobId && blobId !== "jsonBlob") {
-          localStorage.setItem("devx_blob_" + storageKey, blobId);
-          return true;
+          return blobId;
         }
       }
     }
   } catch (e) {
-    console.warn("Cloud push error:", e);
+    console.warn("Create blob error:", e);
   }
-
-  return false;
+  return null;
 }
 
 function updateCloudSyncUI() {
@@ -96,17 +72,23 @@ function updateCloudSyncUI() {
   const input = document.getElementById("syncUserEmailInput");
   const btnDisconnect = document.getElementById("btnDisconnectSyncEmail");
   const statusMsg = document.getElementById("syncStatusMsg");
+  const syncKeyContainer = document.getElementById("syncKeyContainer");
+  const syncKeyDisplay = document.getElementById("syncKeyDisplay");
 
-  if (currentSyncUserEmail) {
-    if (badge) badge.textContent = currentSyncUserEmail;
-    if (input) input.value = currentSyncUserEmail;
+  if (currentSyncKey) {
+    const label = currentSyncUserEmail || (currentSyncKey.substring(0, 10) + "...");
+    if (badge) badge.textContent = label;
+    if (input && !input.value) input.value = currentSyncUserEmail || currentSyncKey;
     if (btnDisconnect) btnDisconnect.style.display = "inline-block";
-    if (statusMsg) statusMsg.textContent = `Current Status: Connected as ${currentSyncUserEmail} (Live Multi-Device Sync Active)`;
+    if (statusMsg) statusMsg.textContent = `Current Status: Connected & Live Syncing (${label})`;
+    if (syncKeyContainer) syncKeyContainer.style.display = "block";
+    if (syncKeyDisplay) syncKeyDisplay.value = currentSyncKey;
   } else {
     if (badge) badge.textContent = "Not Signed In";
-    if (input) input.value = "";
     if (btnDisconnect) btnDisconnect.style.display = "none";
     if (statusMsg) statusMsg.textContent = "Current Status: Disconnected (Local Storage Only)";
+    if (syncKeyContainer) syncKeyContainer.style.display = "none";
+    if (syncKeyDisplay) syncKeyDisplay.value = "";
   }
 }
 
@@ -121,22 +103,46 @@ function closeCloudSyncModal() {
 
 async function connectCloudSyncEmail() {
   const emailInput = document.getElementById("syncUserEmailInput");
-  const email = emailInput ? emailInput.value.trim() : "";
+  const inputVal = emailInput ? emailInput.value.trim() : "";
 
-  if (!email || !email.includes("@")) {
-    alert("Please enter a valid Email Address!");
+  if (!inputVal) {
+    alert("Please enter your Email Address or a Sync Key!");
     return;
   }
 
+  let syncKey = "";
+  let email = "";
+
+  // Check if input is a 36-character UUID Sync Key (contains hyphens)
+  if (inputVal.length > 20 && inputVal.includes("-")) {
+    syncKey = inputVal;
+    email = localStorage.getItem("devx_sync_email") || "Pasted Sync Key";
+  } else {
+    email = inputVal;
+    syncKey = currentSyncKey;
+  }
+
+  // If no sync key exists yet, create a new Cloud Blob on jsonblob.com
+  if (!syncKey) {
+    alert("☁️ Creating your multi-device Cloud Account...");
+    const existingDB = getInvoiceDB();
+    syncKey = await createNewCloudBlob(existingDB);
+    if (!syncKey) {
+      alert("❌ Cloud Account Creation failed. Please check internet connection and try again.");
+      return;
+    }
+  }
+
+  currentSyncKey = syncKey;
   currentSyncUserEmail = email;
+  localStorage.setItem("devx_sync_key", syncKey);
   localStorage.setItem("devx_sync_email", email);
+
   updateCloudSyncUI();
 
-  alert(`☁️ Connected to Cloud Account: ${email}\n\nFetching your cloud invoices now...`);
-  
-  // Pull cloud invoices and update UI
-  const cloudData = await fetchCloudDB(email);
-  if (cloudData && typeof cloudData === 'object') {
+  // Try pulling cloud data
+  const cloudData = await fetchCloudDB(syncKey);
+  if (cloudData && typeof cloudData === 'object' && Object.keys(cloudData).length > 0) {
     const existing = getInvoiceDB();
     const merged = { ...existing, ...cloudData };
     localDatabaseInMemory = merged;
@@ -149,38 +155,52 @@ async function connectCloudSyncEmail() {
       loadInvoiceData(merged[keys[0]]);
     }
     
-    // Upload local invoices to cloud so all devices merge seamlessly
-    await pushCloudDB(email, merged);
+    // Upload merged invoices back to cloud
+    await pushCloudDB(syncKey, merged);
   } else {
-    // New account: upload current local invoices to cloud
+    // Push local invoices to cloud
     const existing = getInvoiceDB();
-    await pushCloudDB(email, existing);
+    await pushCloudDB(syncKey, existing);
   }
 
-  closeCloudSyncModal();
   startCloudSyncTimer();
-  alert(`✅ Cloud Sync Active for "${email}"!\nAll changes will automatically sync across your computers.`);
+  alert(`✅ Cloud Sync Connected!\n\nYour Sync Key is:\n${syncKey}\n\nTo sync another computer, click "Sync Account" on that computer and paste this Sync Key!`);
 }
 
 function disconnectCloudSyncEmail() {
-  if (confirm("Are you sure you want to log out of Cloud Sync on this computer?")) {
+  if (confirm("Are you sure you want to disconnect Cloud Sync on this computer?")) {
     currentSyncUserEmail = "";
+    currentSyncKey = "";
     localStorage.removeItem("devx_sync_email");
+    localStorage.removeItem("devx_sync_key");
     updateCloudSyncUI();
     if (cloudSyncTimer) clearInterval(cloudSyncTimer);
     closeCloudSyncModal();
-    alert("Logged out of Cloud Sync on this machine.");
+    alert("Disconnected from Cloud Sync on this machine.");
+  }
+}
+
+function copySyncKeyToClipboard() {
+  const syncKeyDisplay = document.getElementById("syncKeyDisplay");
+  if (syncKeyDisplay && syncKeyDisplay.value) {
+    navigator.clipboard.writeText(syncKeyDisplay.value).then(() => {
+      alert("📋 Sync Key copied to clipboard!\n\nPaste this key into 'Sync Account' on any other computer to link all your invoices!");
+    }).catch(() => {
+      syncKeyDisplay.select();
+      document.execCommand("copy");
+      alert("📋 Sync Key copied!");
+    });
   }
 }
 
 function startCloudSyncTimer() {
   if (cloudSyncTimer) clearInterval(cloudSyncTimer);
-  if (!currentSyncUserEmail) return;
+  if (!currentSyncKey) return;
 
-  // Poll cloud database every 30 seconds only when tab is active
+  // Poll cloud database every 15 seconds when tab is active
   cloudSyncTimer = setInterval(async () => {
-    if (!currentSyncUserEmail || document.hidden) return;
-    const remoteData = await fetchCloudDB(currentSyncUserEmail);
+    if (!currentSyncKey || document.hidden) return;
+    const remoteData = await fetchCloudDB(currentSyncKey);
     if (remoteData && typeof remoteData === 'object' && Object.keys(remoteData).length > 0) {
       const localStr = JSON.stringify(localDatabaseInMemory);
       const remoteStr = JSON.stringify(remoteData);
@@ -194,7 +214,7 @@ function startCloudSyncTimer() {
         console.log("Background cloud invoice database update pulled successfully!");
       }
     }
-  }, 30000);
+  }, 15000);
 }
 
 // --- PRESET COMPANY DATA ---
@@ -398,11 +418,13 @@ function setupEventListeners() {
   const btnCloseSyncModal = document.getElementById("btnCloseSyncModal");
   const btnConnectSyncEmail = document.getElementById("btnConnectSyncEmail");
   const btnDisconnectSyncEmail = document.getElementById("btnDisconnectSyncEmail");
+  const btnCopySyncKey = document.getElementById("btnCopySyncKey");
 
   if (btnCloudSync) btnCloudSync.addEventListener("click", openCloudSyncModal);
   if (btnCloseSyncModal) btnCloseSyncModal.addEventListener("click", closeCloudSyncModal);
   if (btnConnectSyncEmail) btnConnectSyncEmail.addEventListener("click", connectCloudSyncEmail);
   if (btnDisconnectSyncEmail) btnDisconnectSyncEmail.addEventListener("click", disconnectCloudSyncEmail);
+  if (btnCopySyncKey) btnCopySyncKey.addEventListener("click", copySyncKeyToClipboard);
 
   // Database, Master Sheet & E-Invoice Header Actions
   document.getElementById("btnSaveToDB").addEventListener("click", saveInvoiceToDB);
@@ -1374,15 +1396,15 @@ function renderQRCodeFromText(text) {
 let localDatabaseInMemory = {};
 
 async function loadDBFromServer() {
-  // 1. Try loading from Cloud REST storage if email is connected
-  if (currentSyncUserEmail) {
-    const cloudData = await fetchCloudDB(currentSyncUserEmail);
+  // 1. Try loading from Cloud REST storage if syncKey is connected
+  if (currentSyncKey) {
+    const cloudData = await fetchCloudDB(currentSyncKey);
     if (cloudData && typeof cloudData === 'object' && Object.keys(cloudData).length > 0) {
       localDatabaseInMemory = cloudData;
       localStorage.setItem("devx_invoice_db", JSON.stringify(cloudData));
       updateDBBadgeCount();
       if (typeof renderInvoiceDBList === 'function') renderInvoiceDBList();
-      console.log(`Database successfully synced from Cloud Account (${currentSyncUserEmail})!`);
+      console.log(`Database successfully synced from Cloud Sync Key (${currentSyncKey})!`);
       return;
     }
   }
@@ -1417,13 +1439,13 @@ async function saveDBToServer(localDB) {
   localStorage.setItem("devx_invoice_db", JSON.stringify(localDB));
   localDatabaseInMemory = localDB;
 
-  // 1. Try saving to Cloud REST storage if email is connected
-  if (currentSyncUserEmail) {
+  // 1. Try saving to Cloud REST storage if syncKey is connected
+  if (currentSyncKey) {
     try {
-      await pushCloudDB(currentSyncUserEmail, localDB);
-      console.log(`Database successfully synced to Cloud Account (${currentSyncUserEmail})!`);
+      await pushCloudDB(currentSyncKey, localDB);
+      console.log(`Database successfully synced to Cloud Sync Key (${currentSyncKey})!`);
     } catch (err) {
-      console.error("Failed to push database to Cloud Account:", err);
+      console.error("Failed to push database to Cloud Sync Key:", err);
     }
   }
 
