@@ -1,3 +1,18 @@
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyBdZGcgBp6ls_a5NW6C0602M8PMSr3IBa0",
+  authDomain: "nvocc-ims.firebaseapp.com",
+  projectId: "nvocc-ims",
+  storageBucket: "nvocc-ims.firebasestorage.app",
+  messagingSenderId: "942384682030",
+  appId: "1:942384682030:web:ade82ddbdf875dcc727bbf",
+  measurementId: "G-S4Z6EKLB1W"
+};
+
+// Initialize Firebase
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
 /*
   Devx Maritime Invoice Builder - Core Application Logic
   Includes Multi-Company Profile Manager, Live A4 Sync, Math Engine, Indian Currency Words,
@@ -158,16 +173,46 @@ let currentQRDataUrl = "";
 // --- INITIALIZATION ---
 document.addEventListener("DOMContentLoaded", () => {
   setupEventListeners();
-  loadDBFromServer().then(() => {
-    // Auto-load first invoice from database if present, otherwise load sample
-    const db = getInvoiceDB();
-    const keys = Object.keys(db);
-    if (keys.length > 0) {
-      loadInvoiceData(db[keys[0]]);
-    } else {
-      loadInvoiceData(SAMPLE_INVOICE_DATA);
-    }
+
+  // Real-time sync with Firebase Firestore using onSnapshot
+  db.collection("invoices").onSnapshot((snapshot) => {
+    const firebaseDB = {};
+    snapshot.forEach((doc) => {
+      firebaseDB[doc.id] = doc.data();
+    });
+
+    const isInitialLoad = Object.keys(localDatabaseInMemory).length === 0;
+
+    localDatabaseInMemory = firebaseDB;
+    localStorage.setItem("devx_invoice_db", JSON.stringify(firebaseDB));
     updateDBBadgeCount();
+
+    if (typeof renderInvoiceDBList === 'function') {
+      renderInvoiceDBList();
+    }
+
+    // Auto-load first invoice if local editor is empty/uninitialized
+    if (isInitialLoad) {
+      const keys = Object.keys(firebaseDB);
+      if (keys.length > 0) {
+        loadInvoiceData(firebaseDB[keys[0]]);
+      } else {
+        loadInvoiceData(SAMPLE_INVOICE_DATA);
+      }
+    }
+    console.log("Real-time database update synced from Firebase Firestore!");
+  }, (err) => {
+    console.warn("Firestore onSnapshot error, falling back to local server/localStorage:", err);
+    // Fall back to offline load
+    loadDBFromServer().then(() => {
+      const localDB = getInvoiceDB();
+      const keys = Object.keys(localDB);
+      if (keys.length > 0) {
+        loadInvoiceData(localDB[keys[0]]);
+      } else {
+        loadInvoiceData(SAMPLE_INVOICE_DATA);
+      }
+    });
   });
 });
 
@@ -1166,6 +1211,36 @@ function renderQRCodeFromText(text) {
 let localDatabaseInMemory = {};
 
 async function loadDBFromServer() {
+  // Try loading from Firebase Firestore using Compat SDK
+  try {
+    const querySnapshot = await db.collection("invoices").get();
+    const firebaseDB = {};
+    querySnapshot.forEach((doc) => {
+      firebaseDB[doc.id] = doc.data();
+    });
+    
+    localDatabaseInMemory = firebaseDB;
+    localStorage.setItem("devx_invoice_db", JSON.stringify(firebaseDB));
+    updateDBBadgeCount();
+    if (typeof renderInvoiceDBList === 'function') renderInvoiceDBList();
+    console.log("Database successfully synced from Firebase Firestore!");
+    
+    // Proactively back up Firestore data to local mock server if available
+    try {
+      await fetch(`${SERVER_API_URL}/save-db`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(firebaseDB, null, 2)
+      });
+    } catch (e) {
+      // Ignore local mock server backup failures
+    }
+    return;
+  } catch (err) {
+    console.warn("Firebase Firestore not available or permission denied. Falling back to local server/localStorage:", err);
+  }
+
+  // Fallback to local server API
   try {
     const res = await fetch(`${SERVER_API_URL}/load-db`);
     if (res.ok) {
@@ -1188,14 +1263,27 @@ async function loadDBFromServer() {
   updateDBBadgeCount();
 }
 
-async function saveDBToServer(db) {
-  localStorage.setItem("devx_invoice_db", JSON.stringify(db));
-  localDatabaseInMemory = db;
+async function saveDBToServer(localDB) {
+  localStorage.setItem("devx_invoice_db", JSON.stringify(localDB));
+  localDatabaseInMemory = localDB;
+
+  // Try saving all database records to Firebase Firestore using Compat SDK
+  try {
+    const promises = Object.entries(localDB).map(([invNo, record]) => {
+      return db.collection("invoices").doc(invNo).set(record);
+    });
+    await Promise.all(promises);
+    console.log("Database successfully saved to Firebase Firestore!");
+  } catch (err) {
+    console.error("Failed to save database to Firebase Firestore:", err);
+  }
+
+  // Fallback to local server API write
   try {
     await fetch(`${SERVER_API_URL}/save-db`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(db, null, 2)
+      body: JSON.stringify(localDB, null, 2)
     });
     console.log("Database successfully saved to invoices_database.json!");
   } catch (err) {
@@ -1211,8 +1299,8 @@ function getInvoiceDB() {
   return localDatabaseInMemory || {};
 }
 
-function saveInvoiceToDB() {
-  const db = getInvoiceDB();
+async function saveInvoiceToDB() {
+  const localDB = getInvoiceDB();
   const invNo = document.getElementById("invNo").value.trim();
   if (!invNo) {
     alert("Please enter an Invoice No before saving to Database!");
@@ -1300,8 +1388,18 @@ function saveInvoiceToDB() {
     savedAt: new Date().toLocaleString()
   };
 
-  db[invNo] = invoiceRecord;
-  saveDBToServer(db);
+  localDB[invNo] = invoiceRecord;
+  
+  // Save single document to Firestore using Compat SDK
+  try {
+    await db.collection("invoices").doc(invNo).set(invoiceRecord);
+    console.log(`Invoice "${invNo}" successfully saved to Firebase Firestore!`);
+  } catch (err) {
+    console.error("Failed to save invoice to Firebase Firestore:", err);
+  }
+
+  // Backup write using local storage and server
+  await saveDBToServer(localDB);
 
   updateDBBadgeCount();
   alert(`✅ Invoice "${invNo}" saved successfully in Database!`);
@@ -1576,15 +1674,24 @@ function getSelectedOrFilteredInvoices() {
   }
 }
 
-function deleteInvoiceFromDB(invNo) {
-  const db = getInvoiceDB();
-  delete db[invNo];
-  saveDBToServer(db);
+async function deleteInvoiceFromDB(invNo) {
+  const localDB = getInvoiceDB();
+  delete localDB[invNo];
+  
+  // Delete document from Firebase Firestore using Compat SDK
+  try {
+    await db.collection("invoices").doc(invNo).delete();
+    console.log(`Invoice "${invNo}" successfully deleted from Firebase Firestore!`);
+  } catch (err) {
+    console.error("Failed to delete invoice from Firebase Firestore:", err);
+  }
+
+  await saveDBToServer(localDB);
   updateDBBadgeCount();
   renderInvoiceDBList();
 }
 
-function deleteSelectedMasterInvoices() {
+async function deleteSelectedMasterInvoices() {
   const selectedCbs = document.querySelectorAll(".chk-master-item:checked");
   if (selectedCbs.length === 0) {
     alert("Please select at least one invoice using checkboxes to delete!");
@@ -1592,11 +1699,22 @@ function deleteSelectedMasterInvoices() {
   }
 
   if (confirm(`Are you sure you want to delete ${selectedCbs.length} selected invoice(s) permanently?`)) {
-    const db = getInvoiceDB();
+    const localDB = getInvoiceDB();
+    const promises = [];
     selectedCbs.forEach(cb => {
-      delete db[cb.dataset.id];
+      const invNo = cb.dataset.id;
+      delete localDB[invNo];
+      promises.push(db.collection("invoices").doc(invNo).delete());
     });
-    saveDBToServer(db);
+
+    try {
+      await Promise.all(promises);
+      console.log("Selected invoices deleted from Firebase Firestore");
+    } catch (err) {
+      console.error("Error deleting selected invoices from Firebase Firestore:", err);
+    }
+
+    await saveDBToServer(localDB);
     updateDBBadgeCount();
     renderInvoiceDBList();
   }
@@ -2460,8 +2578,7 @@ function handleEInvGenerateIRN() {
 
   const db = getInvoiceDB();
   db[currentEInvTargetData.invNo] = currentEInvTargetData;
-  localStorage.setItem("devx_invoice_db", JSON.stringify(db));
-  updateDBBadgeCount();
+  await saveDBToServer(db);
 
   document.getElementById("einvLogsBox").textContent = JSON.stringify(irnResponse, null, 2);
   alert(`⚡ IRN & QR Code Generated Successfully via ${env} API!\n\nIRN: ${mockIRN}\nAck No: ${mockAckNo}\n\nStamped directly onto invoice!`);
