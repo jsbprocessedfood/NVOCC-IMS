@@ -41,6 +41,7 @@
         </select>
       </div>
 
+      <button id="btnCloudSync" class="btn btn-secondary" title="Multi-Device Cloud Sync Account">☁️ Sync Account: <span id="userSyncEmailBadge" style="font-weight: 600;">Not Signed In</span></button>
       <button id="btnSaveProfile" class="btn btn-secondary" title="Save current company details as preset">💾 Save Profile</button>
       <button id="btnLoadSample" class="btn btn-secondary" title="Load sample bill data (NSA065014708)">⚡ Sample Data</button>
       <button id="btnSaveToDB" class="btn btn-primary" title="Save or update this invoice in Database">💾 Save Invoice</button>
@@ -827,10 +828,41 @@
     </div>
   </div>
 
-  <!-- Firebase App (the core Firebase SDK) -->
-  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
-  <!-- Firebase Firestore (the database) -->
-  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+  <!-- MULTI-DEVICE CLOUD SYNC AUTH MODAL -->
+  <div id="syncAuthModal" class="modal-overlay" style="display: none;">
+    <div class="modal-content" style="max-width: 480px;">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 0.75rem;">
+          <span style="font-size: 1.5rem;">☁️</span>
+          <div>
+            <h3 style="margin: 0; font-size: 1.15rem;">Multi-Device Cloud Account Sync</h3>
+            <p style="margin: 0; font-size: 0.75rem; color: var(--text-muted);">Sync invoices live across all your computers & devices when hosted on GitHub</p>
+          </div>
+        </div>
+        <button id="btnCloseSyncModal" class="btn btn-danger btn-sm">✖ Close</button>
+      </div>
+
+      <div class="modal-body">
+        <div style="background: rgba(2, 132, 199, 0.1); border-left: 3px solid #0284c7; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem; font-size: 0.8rem; color: var(--text-color);">
+          💡 <strong>How it works:</strong> Enter your Email ID below. Any invoice you create or edit will instantly sync to the cloud under your email address so it appears on all your computers!
+        </div>
+
+        <div class="form-group">
+          <label style="font-weight: 600; font-size: 0.85rem;">Enter Your Email Address:</label>
+          <input type="email" id="syncUserEmailInput" class="form-control" placeholder="e.g. sanjeev@jsbcargo.com" style="margin-top: 0.35rem;">
+        </div>
+
+        <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
+          <button id="btnConnectSyncEmail" class="btn btn-primary" style="flex: 1;">🚀 Connect & Sync Invoices</button>
+          <button id="btnDisconnectSyncEmail" class="btn btn-danger" style="display: none;">Logout</button>
+        </div>
+
+        <div id="syncStatusMsg" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.75rem; text-align: center;">
+          Current Status: Disconnected
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

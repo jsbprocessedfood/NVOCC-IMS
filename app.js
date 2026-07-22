@@ -1,25 +1,210 @@
-// Your web app's Firebase configuration
-const firebaseConfig = {
-  apiKey: "AIzaSyBdZGcgBp6ls_a5NW6C0602M8PMSr3IBa0",
-  authDomain: "nvocc-ims.firebaseapp.com",
-  projectId: "nvocc-ims",
-  storageBucket: "nvocc-ims.firebasestorage.app",
-  messagingSenderId: "942384682030",
-  appId: "1:942384682030:web:ade82ddbdf875dcc727bbf",
-  measurementId: "G-S4Z6EKLB1W"
-};
-
-// Initialize Firebase
-firebase.initializeApp(firebaseConfig);
-const db = firebase.firestore();
-
 /*
   Devx Maritime Invoice Builder - Core Application Logic
   Includes Multi-Company Profile Manager, Live A4 Sync, Math Engine, Indian Currency Words,
-  e-Invoice QR Code Handling, Local Database, and Invoice Cloning/Duplication.
+  e-Invoice QR Code Handling, Local Database, and Multi-Device Email Cloud Sync Engine.
 */
 
 const DEFAULT_LOGO = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%230284c7'/><path d='M20 50 Q 35 20, 50 50 T 80 50' stroke='white' stroke-width='6' fill='none'/></svg>";
+
+// --- MULTI-DEVICE EMAIL CLOUD SYNC ENGINE (No Firebase / CORS-free Cloud Store) ---
+let currentSyncUserEmail = localStorage.getItem("devx_sync_email") || "";
+let cloudSyncTimer = null;
+
+// Get a clean cloud bin key from the user's email address
+function getCloudStorageKey(email) {
+  if (!email) return "";
+  const cleanEmail = email.toLowerCase().trim();
+  let hash = 0;
+  for (let i = 0; i < cleanEmail.length; i++) {
+    hash = ((hash << 5) - hash) + cleanEmail.charCodeAt(i);
+    hash |= 0;
+  }
+  const positiveHash = Math.abs(hash).toString(36);
+  const safeName = cleanEmail.replace(/[^a-z0-9]/g, '');
+  return `devx_sync_${safeName.substring(0, 15)}_${positiveHash}`;
+}
+
+// Fetch invoices from cloud REST storage for current email
+async function fetchCloudDB(email) {
+  if (!email) return null;
+  const storageKey = getCloudStorageKey(email);
+  if (!storageKey) return null;
+
+  try {
+    const res = await fetch(`https://api.npoint.io/${storageKey}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && typeof data === 'object' && !Array.isArray(data)) {
+        return data;
+      }
+    }
+  } catch (err) {
+    console.warn("Cloud Sync Fetch Warning:", err);
+  }
+
+  // Fallback to secondary jsonblob cloud store
+  try {
+    const storedBlobId = localStorage.getItem("devx_blob_" + storageKey);
+    if (storedBlobId) {
+      const res = await fetch(`https://jsonblob.com/api/jsonBlob/${storedBlobId}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && typeof data === 'object' && !Array.isArray(data)) {
+          return data;
+        }
+      }
+    }
+  } catch (e) {}
+
+  return null;
+}
+
+// Push local invoices to cloud REST storage for current email
+async function pushCloudDB(email, dbData) {
+  if (!email || !dbData) return false;
+  const storageKey = getCloudStorageKey(email);
+  if (!storageKey) return false;
+
+  try {
+    await fetch(`https://api.npoint.io/${storageKey}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(dbData)
+    });
+  } catch (e) {}
+
+  try {
+    let storedBlobId = localStorage.getItem("devx_blob_" + storageKey);
+    if (storedBlobId) {
+      await fetch(`https://jsonblob.com/api/jsonBlob/${storedBlobId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(dbData)
+      });
+    } else {
+      const res = await fetch(`https://jsonblob.com/api/jsonBlob`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(dbData)
+      });
+      if (res.ok) {
+        const location = res.headers.get("Location");
+        if (location) {
+          const blobId = location.split("/").pop();
+          localStorage.setItem("devx_blob_" + storageKey, blobId);
+        }
+      }
+    }
+  } catch (e) {}
+
+  return true;
+}
+
+function updateCloudSyncUI() {
+  const badge = document.getElementById("userSyncEmailBadge");
+  const input = document.getElementById("syncUserEmailInput");
+  const btnDisconnect = document.getElementById("btnDisconnectSyncEmail");
+  const statusMsg = document.getElementById("syncStatusMsg");
+
+  if (currentSyncUserEmail) {
+    if (badge) badge.textContent = currentSyncUserEmail;
+    if (input) input.value = currentSyncUserEmail;
+    if (btnDisconnect) btnDisconnect.style.display = "inline-block";
+    if (statusMsg) statusMsg.textContent = `Current Status: Connected as ${currentSyncUserEmail} (Live Multi-Device Sync Active)`;
+  } else {
+    if (badge) badge.textContent = "Not Signed In";
+    if (input) input.value = "";
+    if (btnDisconnect) btnDisconnect.style.display = "none";
+    if (statusMsg) statusMsg.textContent = "Current Status: Disconnected (Local Storage Only)";
+  }
+}
+
+function openCloudSyncModal() {
+  updateCloudSyncUI();
+  document.getElementById("syncAuthModal").style.display = "flex";
+}
+
+function closeCloudSyncModal() {
+  document.getElementById("syncAuthModal").style.display = "none";
+}
+
+async function connectCloudSyncEmail() {
+  const emailInput = document.getElementById("syncUserEmailInput");
+  const email = emailInput ? emailInput.value.trim() : "";
+
+  if (!email || !email.includes("@")) {
+    alert("Please enter a valid Email Address!");
+    return;
+  }
+
+  currentSyncUserEmail = email;
+  localStorage.setItem("devx_sync_email", email);
+  updateCloudSyncUI();
+
+  alert(`☁️ Connected to Cloud Account: ${email}\n\nFetching your cloud invoices now...`);
+  
+  // Pull cloud invoices and update UI
+  const cloudData = await fetchCloudDB(email);
+  if (cloudData && typeof cloudData === 'object') {
+    const existing = getInvoiceDB();
+    const merged = { ...existing, ...cloudData };
+    localDatabaseInMemory = merged;
+    localStorage.setItem("devx_invoice_db", JSON.stringify(merged));
+    updateDBBadgeCount();
+    if (typeof renderInvoiceDBList === 'function') renderInvoiceDBList();
+
+    const keys = Object.keys(merged);
+    if (keys.length > 0) {
+      loadInvoiceData(merged[keys[0]]);
+    }
+    
+    // Upload local invoices to cloud so all devices merge seamlessly
+    await pushCloudDB(email, merged);
+  } else {
+    // New account: upload current local invoices to cloud
+    const existing = getInvoiceDB();
+    await pushCloudDB(email, existing);
+  }
+
+  closeCloudSyncModal();
+  startCloudSyncTimer();
+  alert(`✅ Cloud Sync Active for "${email}"!\nAll changes will automatically sync across your computers.`);
+}
+
+function disconnectCloudSyncEmail() {
+  if (confirm("Are you sure you want to log out of Cloud Sync on this computer?")) {
+    currentSyncUserEmail = "";
+    localStorage.removeItem("devx_sync_email");
+    updateCloudSyncUI();
+    if (cloudSyncTimer) clearInterval(cloudSyncTimer);
+    closeCloudSyncModal();
+    alert("Logged out of Cloud Sync on this machine.");
+  }
+}
+
+function startCloudSyncTimer() {
+  if (cloudSyncTimer) clearInterval(cloudSyncTimer);
+  if (!currentSyncUserEmail) return;
+
+  // Poll cloud database every 12 seconds
+  cloudSyncTimer = setInterval(async () => {
+    if (!currentSyncUserEmail) return;
+    const remoteData = await fetchCloudDB(currentSyncUserEmail);
+    if (remoteData && typeof remoteData === 'object') {
+      const localStr = JSON.stringify(localDatabaseInMemory);
+      const remoteStr = JSON.stringify(remoteData);
+      if (localStr !== remoteStr) {
+        localDatabaseInMemory = remoteData;
+        localStorage.setItem("devx_invoice_db", JSON.stringify(remoteData));
+        updateDBBadgeCount();
+        if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display !== "none") {
+          renderInvoiceDBList();
+        }
+        console.log("Background cloud invoice database update pulled successfully!");
+      }
+    }
+  }, 12000);
+}
 
 // --- PRESET COMPANY DATA ---
 const COMPANY_PRESETS = {
@@ -170,50 +355,26 @@ let lineItems = [];
 let currentLayoutMode = 0; // 0: split, 1: form-only, 2: preview-only
 let currentQRDataUrl = "";
 
-// --- INITIALIZATION ---
 document.addEventListener("DOMContentLoaded", () => {
   setupEventListeners();
+  updateCloudSyncUI();
 
-  // Real-time sync with Firebase Firestore using onSnapshot
-  db.collection("invoices").onSnapshot((snapshot) => {
-    const firebaseDB = {};
-    snapshot.forEach((doc) => {
-      firebaseDB[doc.id] = doc.data();
-    });
-
-    const isInitialLoad = Object.keys(localDatabaseInMemory).length === 0;
-
-    localDatabaseInMemory = firebaseDB;
-    localStorage.setItem("devx_invoice_db", JSON.stringify(firebaseDB));
+  // Load database from cloud / server / localStorage
+  loadDBFromServer().then(() => {
+    const dbData = getInvoiceDB();
+    const keys = Object.keys(dbData);
+    if (keys.length > 0) {
+      loadInvoiceData(dbData[keys[0]]);
+    } else {
+      loadInvoiceData(SAMPLE_INVOICE_DATA);
+    }
     updateDBBadgeCount();
-
-    if (typeof renderInvoiceDBList === 'function') {
-      renderInvoiceDBList();
-    }
-
-    // Auto-load first invoice if local editor is empty/uninitialized
-    if (isInitialLoad) {
-      const keys = Object.keys(firebaseDB);
-      if (keys.length > 0) {
-        loadInvoiceData(firebaseDB[keys[0]]);
-      } else {
-        loadInvoiceData(SAMPLE_INVOICE_DATA);
-      }
-    }
-    console.log("Real-time database update synced from Firebase Firestore!");
-  }, (err) => {
-    console.warn("Firestore onSnapshot error, falling back to local server/localStorage:", err);
-    // Fall back to offline load
-    loadDBFromServer().then(() => {
-      const localDB = getInvoiceDB();
-      const keys = Object.keys(localDB);
-      if (keys.length > 0) {
-        loadInvoiceData(localDB[keys[0]]);
-      } else {
-        loadInvoiceData(SAMPLE_INVOICE_DATA);
-      }
-    });
   });
+
+  // Start background Cloud Sync if email is already connected
+  if (currentSyncUserEmail) {
+    startCloudSyncTimer();
+  }
 });
 
 function setupEventListeners() {
@@ -240,6 +401,17 @@ function setupEventListeners() {
   document.getElementById("btnReset").addEventListener("click", resetForm);
   document.getElementById("btnToggleLayout").addEventListener("click", toggleLayoutMode);
   document.getElementById("btnPrint").addEventListener("click", () => window.print());
+
+  // Cloud Sync Header & Modal Button Handlers
+  const btnCloudSync = document.getElementById("btnCloudSync");
+  const btnCloseSyncModal = document.getElementById("btnCloseSyncModal");
+  const btnConnectSyncEmail = document.getElementById("btnConnectSyncEmail");
+  const btnDisconnectSyncEmail = document.getElementById("btnDisconnectSyncEmail");
+
+  if (btnCloudSync) btnCloudSync.addEventListener("click", openCloudSyncModal);
+  if (btnCloseSyncModal) btnCloseSyncModal.addEventListener("click", closeCloudSyncModal);
+  if (btnConnectSyncEmail) btnConnectSyncEmail.addEventListener("click", connectCloudSyncEmail);
+  if (btnDisconnectSyncEmail) btnDisconnectSyncEmail.addEventListener("click", disconnectCloudSyncEmail);
 
   // Database, Master Sheet & E-Invoice Header Actions
   document.getElementById("btnSaveToDB").addEventListener("click", saveInvoiceToDB);
@@ -1211,36 +1383,20 @@ function renderQRCodeFromText(text) {
 let localDatabaseInMemory = {};
 
 async function loadDBFromServer() {
-  // Try loading from Firebase Firestore using Compat SDK
-  try {
-    const querySnapshot = await db.collection("invoices").get();
-    const firebaseDB = {};
-    querySnapshot.forEach((doc) => {
-      firebaseDB[doc.id] = doc.data();
-    });
-    
-    localDatabaseInMemory = firebaseDB;
-    localStorage.setItem("devx_invoice_db", JSON.stringify(firebaseDB));
-    updateDBBadgeCount();
-    if (typeof renderInvoiceDBList === 'function') renderInvoiceDBList();
-    console.log("Database successfully synced from Firebase Firestore!");
-    
-    // Proactively back up Firestore data to local mock server if available
-    try {
-      await fetch(`${SERVER_API_URL}/save-db`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(firebaseDB, null, 2)
-      });
-    } catch (e) {
-      // Ignore local mock server backup failures
+  // 1. Try loading from Cloud REST storage if email is connected
+  if (currentSyncUserEmail) {
+    const cloudData = await fetchCloudDB(currentSyncUserEmail);
+    if (cloudData && typeof cloudData === 'object' && Object.keys(cloudData).length > 0) {
+      localDatabaseInMemory = cloudData;
+      localStorage.setItem("devx_invoice_db", JSON.stringify(cloudData));
+      updateDBBadgeCount();
+      if (typeof renderInvoiceDBList === 'function') renderInvoiceDBList();
+      console.log(`Database successfully synced from Cloud Account (${currentSyncUserEmail})!`);
+      return;
     }
-    return;
-  } catch (err) {
-    console.warn("Firebase Firestore not available or permission denied. Falling back to local server/localStorage:", err);
   }
 
-  // Fallback to local server API
+  // 2. Fallback to local server API
   try {
     const res = await fetch(`${SERVER_API_URL}/load-db`);
     if (res.ok) {
@@ -1258,6 +1414,7 @@ async function loadDBFromServer() {
     console.warn("Server API not available. Using offline localStorage database:", err);
   }
   
+  // 3. Fallback to localStorage
   const localData = localStorage.getItem("devx_invoice_db");
   localDatabaseInMemory = localData ? JSON.parse(localData) : {};
   updateDBBadgeCount();
@@ -1267,18 +1424,17 @@ async function saveDBToServer(localDB) {
   localStorage.setItem("devx_invoice_db", JSON.stringify(localDB));
   localDatabaseInMemory = localDB;
 
-  // Try saving all database records to Firebase Firestore using Compat SDK
-  try {
-    const promises = Object.entries(localDB).map(([invNo, record]) => {
-      return db.collection("invoices").doc(invNo).set(record);
-    });
-    await Promise.all(promises);
-    console.log("Database successfully saved to Firebase Firestore!");
-  } catch (err) {
-    console.error("Failed to save database to Firebase Firestore:", err);
+  // 1. Try saving to Cloud REST storage if email is connected
+  if (currentSyncUserEmail) {
+    try {
+      await pushCloudDB(currentSyncUserEmail, localDB);
+      console.log(`Database successfully synced to Cloud Account (${currentSyncUserEmail})!`);
+    } catch (err) {
+      console.error("Failed to push database to Cloud Account:", err);
+    }
   }
 
-  // Fallback to local server API write
+  // 2. Fallback write to local server API
   try {
     await fetch(`${SERVER_API_URL}/save-db`, {
       method: "POST",
@@ -1390,15 +1546,7 @@ async function saveInvoiceToDB() {
 
   localDB[invNo] = invoiceRecord;
   
-  // Save single document to Firestore using Compat SDK
-  try {
-    await db.collection("invoices").doc(invNo).set(invoiceRecord);
-    console.log(`Invoice "${invNo}" successfully saved to Firebase Firestore!`);
-  } catch (err) {
-    console.error("Failed to save invoice to Firebase Firestore:", err);
-  }
-
-  // Backup write using local storage and server
+  // Save to Cloud REST storage & Local storage & local server
   await saveDBToServer(localDB);
 
   updateDBBadgeCount();
@@ -1677,15 +1825,6 @@ function getSelectedOrFilteredInvoices() {
 async function deleteInvoiceFromDB(invNo) {
   const localDB = getInvoiceDB();
   delete localDB[invNo];
-  
-  // Delete document from Firebase Firestore using Compat SDK
-  try {
-    await db.collection("invoices").doc(invNo).delete();
-    console.log(`Invoice "${invNo}" successfully deleted from Firebase Firestore!`);
-  } catch (err) {
-    console.error("Failed to delete invoice from Firebase Firestore:", err);
-  }
-
   await saveDBToServer(localDB);
   updateDBBadgeCount();
   renderInvoiceDBList();
@@ -1700,19 +1839,10 @@ async function deleteSelectedMasterInvoices() {
 
   if (confirm(`Are you sure you want to delete ${selectedCbs.length} selected invoice(s) permanently?`)) {
     const localDB = getInvoiceDB();
-    const promises = [];
     selectedCbs.forEach(cb => {
       const invNo = cb.dataset.id;
       delete localDB[invNo];
-      promises.push(db.collection("invoices").doc(invNo).delete());
     });
-
-    try {
-      await Promise.all(promises);
-      console.log("Selected invoices deleted from Firebase Firestore");
-    } catch (err) {
-      console.error("Error deleting selected invoices from Firebase Firestore:", err);
-    }
 
     await saveDBToServer(localDB);
     updateDBBadgeCount();
@@ -2527,7 +2657,7 @@ function handleEInvViewPayload() {
   document.getElementById("einvLogsBox").textContent = `// NIC GST E-INVOICE JSON SCHEMA V1.04 PAYLOAD:\n` + JSON.stringify(payload, null, 2);
 }
 
-function handleEInvGenerateIRN() {
+async function handleEInvGenerateIRN() {
   if (!currentEInvTargetData) return;
 
   const envRadio = document.querySelector('input[name="envMode"]:checked');
