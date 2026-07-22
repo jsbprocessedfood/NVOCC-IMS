@@ -1,21 +1,19 @@
 /*
   Devx Maritime Invoice Builder - Core Application Logic
   Includes Multi-Company Profile Manager, Live A4 Sync, Math Engine, Indian Currency Words,
-  e-Invoice QR Code Handling, Local Database, and Multi-Device Email Cloud Sync Engine.
+  e-Invoice QR Code Handling, and Central Shared Cloud Database (Automatic Multi-User Sync).
 */
 
 const DEFAULT_LOGO = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%230284c7'/><path d='M20 50 Q 35 20, 50 50 T 80 50' stroke='white' stroke-width='6' fill='none'/></svg>";
 
-// --- MULTI-DEVICE CLOUD SYNC ENGINE ---
-let currentSyncUserEmail = localStorage.getItem("devx_sync_email") || "";
-let currentSyncKey = localStorage.getItem("devx_sync_key") || "";
+// --- CENTRAL SHARED CLOUD DATABASE (Hardcoded single database for all 30-40 users) ---
+const CENTRAL_DB_BLOB_ID = "019f89a1-883c-78b2-9f3f-c2bd2b057a40";
 let cloudSyncTimer = null;
 
-// Fetch invoices from cloud REST storage
-async function fetchCloudDB(syncKey) {
-  if (!syncKey) return null;
+// Fetch central invoices database from cloud
+async function fetchCentralCloudDB() {
   try {
-    const res = await fetch(`https://jsonblob.com/api/jsonBlob/${syncKey}`);
+    const res = await fetch(`https://jsonblob.com/api/jsonBlob/${CENTRAL_DB_BLOB_ID}`);
     if (res.ok) {
       const data = await res.json();
       if (data && typeof data === 'object' && !Array.isArray(data)) {
@@ -23,184 +21,34 @@ async function fetchCloudDB(syncKey) {
       }
     }
   } catch (err) {
-    console.warn("Cloud Sync Fetch Warning:", err);
+    console.warn("Central Cloud DB Fetch Warning:", err);
   }
   return null;
 }
 
-// Push local invoices to cloud REST storage
-async function pushCloudDB(syncKey, dbData) {
-  if (!syncKey || !dbData) return false;
+// Push local invoices database to central cloud database
+async function pushCentralCloudDB(dbData) {
+  if (!dbData) return false;
   try {
-    const res = await fetch(`https://jsonblob.com/api/jsonBlob/${syncKey}`, {
+    const res = await fetch(`https://jsonblob.com/api/jsonBlob/${CENTRAL_DB_BLOB_ID}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify(dbData)
     });
     if (res.ok) return true;
   } catch (e) {
-    console.warn("Cloud push error:", e);
+    console.warn("Central Cloud DB Push Error:", e);
   }
   return false;
 }
 
-// Create a new cloud database blob on jsonblob.com
-async function createNewCloudBlob(dbData) {
-  try {
-    const res = await fetch(`https://jsonblob.com/api/jsonBlob`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Accept": "application/json" },
-      body: JSON.stringify(dbData || {})
-    });
-    if (res.ok) {
-      let location = res.headers.get("Location") || res.headers.get("location");
-      if (location) {
-        const blobId = location.split("/").pop();
-        if (blobId && blobId !== "jsonBlob") {
-          return blobId;
-        }
-      }
-    }
-  } catch (e) {
-    console.warn("Create blob error:", e);
-  }
-  return null;
-}
-
-function updateCloudSyncUI() {
-  const badge = document.getElementById("userSyncEmailBadge");
-  const input = document.getElementById("syncUserEmailInput");
-  const btnDisconnect = document.getElementById("btnDisconnectSyncEmail");
-  const statusMsg = document.getElementById("syncStatusMsg");
-  const syncKeyContainer = document.getElementById("syncKeyContainer");
-  const syncKeyDisplay = document.getElementById("syncKeyDisplay");
-
-  if (currentSyncKey) {
-    const label = currentSyncUserEmail || (currentSyncKey.substring(0, 10) + "...");
-    if (badge) badge.textContent = label;
-    if (input && !input.value) input.value = currentSyncUserEmail || currentSyncKey;
-    if (btnDisconnect) btnDisconnect.style.display = "inline-block";
-    if (statusMsg) statusMsg.textContent = `Current Status: Connected & Live Syncing (${label})`;
-    if (syncKeyContainer) syncKeyContainer.style.display = "block";
-    if (syncKeyDisplay) syncKeyDisplay.value = currentSyncKey;
-  } else {
-    if (badge) badge.textContent = "Not Signed In";
-    if (btnDisconnect) btnDisconnect.style.display = "none";
-    if (statusMsg) statusMsg.textContent = "Current Status: Disconnected (Local Storage Only)";
-    if (syncKeyContainer) syncKeyContainer.style.display = "none";
-    if (syncKeyDisplay) syncKeyDisplay.value = "";
-  }
-}
-
-function openCloudSyncModal() {
-  updateCloudSyncUI();
-  document.getElementById("syncAuthModal").style.display = "flex";
-}
-
-function closeCloudSyncModal() {
-  document.getElementById("syncAuthModal").style.display = "none";
-}
-
-async function connectCloudSyncEmail() {
-  const emailInput = document.getElementById("syncUserEmailInput");
-  const inputVal = emailInput ? emailInput.value.trim() : "";
-
-  if (!inputVal) {
-    alert("Please enter your Email Address or a Sync Key!");
-    return;
-  }
-
-  let syncKey = "";
-  let email = "";
-
-  // Check if input is a 36-character UUID Sync Key (contains hyphens)
-  if (inputVal.length > 20 && inputVal.includes("-")) {
-    syncKey = inputVal;
-    email = localStorage.getItem("devx_sync_email") || "Pasted Sync Key";
-  } else {
-    email = inputVal;
-    syncKey = currentSyncKey;
-  }
-
-  // If no sync key exists yet, create a new Cloud Blob on jsonblob.com
-  if (!syncKey) {
-    alert("☁️ Creating your multi-device Cloud Account...");
-    const existingDB = getInvoiceDB();
-    syncKey = await createNewCloudBlob(existingDB);
-    if (!syncKey) {
-      alert("❌ Cloud Account Creation failed. Please check internet connection and try again.");
-      return;
-    }
-  }
-
-  currentSyncKey = syncKey;
-  currentSyncUserEmail = email;
-  localStorage.setItem("devx_sync_key", syncKey);
-  localStorage.setItem("devx_sync_email", email);
-
-  updateCloudSyncUI();
-
-  // Try pulling cloud data
-  const cloudData = await fetchCloudDB(syncKey);
-  if (cloudData && typeof cloudData === 'object' && Object.keys(cloudData).length > 0) {
-    const existing = getInvoiceDB();
-    const merged = { ...existing, ...cloudData };
-    localDatabaseInMemory = merged;
-    localStorage.setItem("devx_invoice_db", JSON.stringify(merged));
-    updateDBBadgeCount();
-    if (typeof renderInvoiceDBList === 'function') renderInvoiceDBList();
-
-    const keys = Object.keys(merged);
-    if (keys.length > 0) {
-      loadInvoiceData(merged[keys[0]]);
-    }
-    
-    // Upload merged invoices back to cloud
-    await pushCloudDB(syncKey, merged);
-  } else {
-    // Push local invoices to cloud
-    const existing = getInvoiceDB();
-    await pushCloudDB(syncKey, existing);
-  }
-
-  startCloudSyncTimer();
-  alert(`✅ Cloud Sync Connected!\n\nYour Sync Key is:\n${syncKey}\n\nTo sync another computer, click "Sync Account" on that computer and paste this Sync Key!`);
-}
-
-function disconnectCloudSyncEmail() {
-  if (confirm("Are you sure you want to disconnect Cloud Sync on this computer?")) {
-    currentSyncUserEmail = "";
-    currentSyncKey = "";
-    localStorage.removeItem("devx_sync_email");
-    localStorage.removeItem("devx_sync_key");
-    updateCloudSyncUI();
-    if (cloudSyncTimer) clearInterval(cloudSyncTimer);
-    closeCloudSyncModal();
-    alert("Disconnected from Cloud Sync on this machine.");
-  }
-}
-
-function copySyncKeyToClipboard() {
-  const syncKeyDisplay = document.getElementById("syncKeyDisplay");
-  if (syncKeyDisplay && syncKeyDisplay.value) {
-    navigator.clipboard.writeText(syncKeyDisplay.value).then(() => {
-      alert("📋 Sync Key copied to clipboard!\n\nPaste this key into 'Sync Account' on any other computer to link all your invoices!");
-    }).catch(() => {
-      syncKeyDisplay.select();
-      document.execCommand("copy");
-      alert("📋 Sync Key copied!");
-    });
-  }
-}
-
-function startCloudSyncTimer() {
+function startCentralCloudSyncTimer() {
   if (cloudSyncTimer) clearInterval(cloudSyncTimer);
-  if (!currentSyncKey) return;
 
-  // Poll cloud database every 15 seconds when tab is active
+  // Poll central cloud database every 10 seconds so all 30-40 users see live changes automatically
   cloudSyncTimer = setInterval(async () => {
-    if (!currentSyncKey || document.hidden) return;
-    const remoteData = await fetchCloudDB(currentSyncKey);
+    if (document.hidden) return;
+    const remoteData = await fetchCentralCloudDB();
     if (remoteData && typeof remoteData === 'object' && Object.keys(remoteData).length > 0) {
       const localStr = JSON.stringify(localDatabaseInMemory);
       const remoteStr = JSON.stringify(remoteData);
@@ -211,10 +59,10 @@ function startCloudSyncTimer() {
         if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display !== "none") {
           renderInvoiceDBList();
         }
-        console.log("Background cloud invoice database update pulled successfully!");
+        console.log("Central Cloud Database update pulled live!");
       }
     }
-  }, 15000);
+  }, 10000);
 }
 
 // --- PRESET COMPANY DATA ---
@@ -368,9 +216,8 @@ let currentQRDataUrl = "";
 
 document.addEventListener("DOMContentLoaded", () => {
   setupEventListeners();
-  updateCloudSyncUI();
 
-  // Load database from cloud / server / localStorage
+  // Load database from Central Shared Cloud Database
   loadDBFromServer().then(() => {
     const dbData = getInvoiceDB();
     const keys = Object.keys(dbData);
@@ -382,10 +229,8 @@ document.addEventListener("DOMContentLoaded", () => {
     updateDBBadgeCount();
   });
 
-  // Start background Cloud Sync if email is already connected
-  if (currentSyncUserEmail) {
-    startCloudSyncTimer();
-  }
+  // Start background live sync timer for all 30-40 users
+  startCentralCloudSyncTimer();
 });
 
 function setupEventListeners() {
@@ -412,19 +257,6 @@ function setupEventListeners() {
   document.getElementById("btnReset").addEventListener("click", resetForm);
   document.getElementById("btnToggleLayout").addEventListener("click", toggleLayoutMode);
   document.getElementById("btnPrint").addEventListener("click", () => window.print());
-
-  // Cloud Sync Header & Modal Button Handlers
-  const btnCloudSync = document.getElementById("btnCloudSync");
-  const btnCloseSyncModal = document.getElementById("btnCloseSyncModal");
-  const btnConnectSyncEmail = document.getElementById("btnConnectSyncEmail");
-  const btnDisconnectSyncEmail = document.getElementById("btnDisconnectSyncEmail");
-  const btnCopySyncKey = document.getElementById("btnCopySyncKey");
-
-  if (btnCloudSync) btnCloudSync.addEventListener("click", openCloudSyncModal);
-  if (btnCloseSyncModal) btnCloseSyncModal.addEventListener("click", closeCloudSyncModal);
-  if (btnConnectSyncEmail) btnConnectSyncEmail.addEventListener("click", connectCloudSyncEmail);
-  if (btnDisconnectSyncEmail) btnDisconnectSyncEmail.addEventListener("click", disconnectCloudSyncEmail);
-  if (btnCopySyncKey) btnCopySyncKey.addEventListener("click", copySyncKeyToClipboard);
 
   // Database, Master Sheet & E-Invoice Header Actions
   document.getElementById("btnSaveToDB").addEventListener("click", saveInvoiceToDB);
@@ -1396,17 +1228,15 @@ function renderQRCodeFromText(text) {
 let localDatabaseInMemory = {};
 
 async function loadDBFromServer() {
-  // 1. Try loading from Cloud REST storage if syncKey is connected
-  if (currentSyncKey) {
-    const cloudData = await fetchCloudDB(currentSyncKey);
-    if (cloudData && typeof cloudData === 'object' && Object.keys(cloudData).length > 0) {
-      localDatabaseInMemory = cloudData;
-      localStorage.setItem("devx_invoice_db", JSON.stringify(cloudData));
-      updateDBBadgeCount();
-      if (typeof renderInvoiceDBList === 'function') renderInvoiceDBList();
-      console.log(`Database successfully synced from Cloud Sync Key (${currentSyncKey})!`);
-      return;
-    }
+  // 1. Load from Central Shared Cloud Database
+  const cloudData = await fetchCentralCloudDB();
+  if (cloudData && typeof cloudData === 'object' && Object.keys(cloudData).length > 0) {
+    localDatabaseInMemory = cloudData;
+    localStorage.setItem("devx_invoice_db", JSON.stringify(cloudData));
+    updateDBBadgeCount();
+    if (typeof renderInvoiceDBList === 'function') renderInvoiceDBList();
+    console.log("Database successfully loaded from Central Shared Cloud Database!");
+    return;
   }
 
   // 2. Fallback to local server API (ONLY when running on localhost)
@@ -1420,12 +1250,12 @@ async function loadDBFromServer() {
           localStorage.setItem("devx_invoice_db", JSON.stringify(data));
           updateDBBadgeCount();
           if (typeof renderInvoiceDBList === 'function') renderInvoiceDBList();
-          console.log("Database successfully synced from invoices_database.json!");
+          console.log("Database successfully loaded from local disk server!");
           return;
         }
       }
     } catch (err) {
-      console.warn("Server API not available. Using offline localStorage database:", err);
+      console.warn("Local server API offline. Using offline localStorage database:", err);
     }
   }
   
@@ -1439,14 +1269,12 @@ async function saveDBToServer(localDB) {
   localStorage.setItem("devx_invoice_db", JSON.stringify(localDB));
   localDatabaseInMemory = localDB;
 
-  // 1. Try saving to Cloud REST storage if syncKey is connected
-  if (currentSyncKey) {
-    try {
-      await pushCloudDB(currentSyncKey, localDB);
-      console.log(`Database successfully synced to Cloud Sync Key (${currentSyncKey})!`);
-    } catch (err) {
-      console.error("Failed to push database to Cloud Sync Key:", err);
-    }
+  // 1. Push to Central Shared Cloud Database
+  try {
+    await pushCentralCloudDB(localDB);
+    console.log("Database successfully pushed to Central Shared Cloud Database!");
+  } catch (err) {
+    console.error("Failed to push database to Central Shared Cloud Database:", err);
   }
 
   // 2. Fallback write to local server API (ONLY when running on localhost)
@@ -1457,9 +1285,9 @@ async function saveDBToServer(localDB) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(localDB, null, 2)
       });
-      console.log("Database successfully saved to invoices_database.json!");
+      console.log("Database successfully saved to local invoices_database.json!");
     } catch (err) {
-      console.warn("Failed to write to invoices_database.json on disk (Server offline):", err);
+      console.warn("Failed to write to local invoices_database.json on disk:", err);
     }
   }
 }
