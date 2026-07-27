@@ -1,252 +1,10 @@
 /*
   Devx Maritime Invoice Builder - Core Application Logic
-  🔧 FIXED: Sync lock to prevent invoice deletion during import
+  Includes Multi-Company Profile Manager, Live A4 Sync, Math Engine, Indian Currency Words,
+  e-Invoice QR Code Handling, Local Database, and Invoice Cloning/Duplication.
 */
 
-const DEFAULT_LOGO = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%230284c7'/><path d='M20 50 Q 35 20, 50 50 T 80 50' fill='white'/></svg>";
-
-// --- CENTRAL SHARED CLOUD DATABASE (Dynamic Auto-Healing Cloud Sync) ---
-let CENTRAL_DB_BLOB_ID = localStorage.getItem("devx_cloud_blob_id") || "019fa26e-f53b-77bf-814a-18afeafa9396";
-let cloudSyncTimer = null;
-let isSyncLocked = false;
-let isImporting = false;
-let syncLockTimeout = null;
-let lastCloudSync = 0;
-const SYNC_DEBOUNCE = 3000;
-let wsClient = null;
-
-// Cross-tab broadcast channel for local multi-tab instant sync
-const broadcastChannel = (typeof BroadcastChannel !== 'undefined') ? new BroadcastChannel('nvocc_ims_sync') : null;
-
-if (broadcastChannel) {
-  broadcastChannel.onmessage = (event) => {
-    if (event && event.data && event.data.type === 'DB_UPDATED') {
-      console.log("⚡ Received instant multi-tab DB update signal");
-      const localData = localStorage.getItem("devx_invoice_db");
-      if (localData) {
-        try {
-          localDatabaseInMemory = JSON.parse(localData);
-          updateDBBadgeCount();
-          if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display !== "none") {
-            renderInvoiceDBList();
-          }
-        } catch (e) { }
-      }
-    }
-  };
-}
-
-// Function to lock sync temporarily (e.g. during imports or manual saves)
-function pauseSyncFor(ms = 5000) {
-  isSyncLocked = true;
-  isImporting = true;
-  if (syncLockTimeout) clearTimeout(syncLockTimeout);
-  syncLockTimeout = setTimeout(() => {
-    isSyncLocked = false;
-    isImporting = false;
-    console.log("🔓 Sync lock released.");
-  }, ms);
-}
-
-// Smart Database Merging to prevent overwriting new/imported invoices
-function smartMergeDB(localDB, remoteDB) {
-  if (!remoteDB || typeof remoteDB !== 'object') return { merged: localDB || {}, changesMade: false };
-  if (!localDB || typeof localDB !== 'object') return { merged: remoteDB || {}, changesMade: true };
-
-  const merged = { ...localDB };
-  let changesMade = false;
-
-  for (const [invNo, remoteRecord] of Object.entries(remoteDB)) {
-    if (!remoteRecord || !remoteRecord.invNo) continue;
-
-    const localRecord = merged[invNo];
-    if (!localRecord) {
-      // Remote has an invoice local doesn't have -> Add it
-      merged[invNo] = remoteRecord;
-      changesMade = true;
-    } else {
-      // Invoice exists in both -> Compare savedAt timestamp
-      const remoteTime = remoteRecord.savedAt ? new Date(remoteRecord.savedAt).getTime() : 0;
-      const localTime = localRecord.savedAt ? new Date(localRecord.savedAt).getTime() : 0;
-
-      if (remoteTime > localTime) {
-        merged[invNo] = remoteRecord;
-        changesMade = true;
-      }
-    }
-  }
-
-  return { merged, changesMade };
-}
-
-// Create a new jsonblob dynamically if expired or 404
-async function createCentralCloudDB(initialData = {}) {
-  try {
-    const res = await fetch("https://jsonblob.com/api/jsonBlob", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Accept": "application/json" },
-      body: JSON.stringify(initialData)
-    });
-    if (res.ok) {
-      const location = res.headers.get("Location") || res.headers.get("x-jsonblob-id");
-      let newId = location ? location.split("/").pop() : null;
-      if (newId) {
-        CENTRAL_DB_BLOB_ID = newId;
-        localStorage.setItem("devx_cloud_blob_id", newId);
-        console.log("✨ Created new Central Cloud JSONBlob ID:", newId);
-        return true;
-      }
-    }
-  } catch (err) {
-    console.warn("Cloud DB Creation Error:", err);
-  }
-  return false;
-}
-
-async function fetchCentralCloudDB() {
-  try {
-    const res = await fetch(`https://jsonblob.com/api/jsonBlob/${CENTRAL_DB_BLOB_ID}`);
-    if (res.status === 404) {
-      console.warn("Central Cloud DB returned 404. Creating fresh cloud database...");
-      await createCentralCloudDB(localDatabaseInMemory || {});
-      return localDatabaseInMemory;
-    }
-    if (res.ok) {
-      const data = await res.json();
-      if (data && typeof data === 'object' && !Array.isArray(data)) {
-        return data;
-      }
-    }
-  } catch (err) {
-    console.warn("Central Cloud DB Fetch Warning:", err);
-  }
-  return null;
-}
-
-async function pushCentralCloudDB(dbData) {
-  if (!dbData) return false;
-  try {
-    const res = await fetch(`https://jsonblob.com/api/jsonBlob/${CENTRAL_DB_BLOB_ID}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", "Accept": "application/json" },
-      body: JSON.stringify(dbData)
-    });
-    if (res.status === 404) {
-      console.warn("Cloud DB Blob ID expired during push. Creating new blob...");
-      return await createCentralCloudDB(dbData);
-    }
-    if (res.ok) {
-      lastCloudSync = Date.now();
-      console.log("✅ Central Cloud DB updated successfully");
-      return true;
-    }
-  } catch (e) {
-    console.warn("Central Cloud DB Push Error:", e);
-  }
-  return false;
-}
-
-function startCentralCloudSyncTimer() {
-  if (cloudSyncTimer) clearInterval(cloudSyncTimer);
-
-  cloudSyncTimer = setInterval(async () => {
-    if (document.hidden || isSyncLocked || isImporting) return;
-    if (Date.now() - lastCloudSync < SYNC_DEBOUNCE) return;
-
-    const remoteData = await fetchCentralCloudDB();
-    if (remoteData && typeof remoteData === 'object' && Object.keys(remoteData).length > 0) {
-      const { merged, changesMade } = smartMergeDB(localDatabaseInMemory, remoteData);
-
-      if (changesMade) {
-        localDatabaseInMemory = merged;
-        localStorage.setItem("devx_invoice_db", JSON.stringify(localDatabaseInMemory));
-        updateDBBadgeCount();
-        if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display !== "none") {
-          renderInvoiceDBList();
-        }
-        console.log("🔄 Central Cloud Database smart-merged live!");
-      }
-
-      // If local has invoices missing in remote, push merged DB to cloud
-      const localKeys = Object.keys(localDatabaseInMemory);
-      const remoteKeys = Object.keys(remoteData);
-      const missingInRemote = localKeys.some(k => !remoteKeys.includes(k));
-      if (missingInRemote && !isSyncLocked && !isImporting) {
-        await pushCentralCloudDB(localDatabaseInMemory);
-      }
-    }
-  }, 10000);
-}
-
-// Initialize Real-Time WebSocket Client Connection to server.js
-function initWebSocketSync() {
-  const isLocalHost = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-  const isGitHubPages = window.location.hostname.includes('github.io');
-
-  // Skip WebSocket on static hosts like GitHub Pages to prevent connection error logs
-  if (isGitHubPages || !isLocalHost) {
-    console.log("🌐 Running on Static Web Host (GitHub Pages). Using Cloud Sync & LocalStorage.");
-    return;
-  }
-    console.log("🌐 Running on Static Web Host (GitHub Pages). Using Cloud Sync & LocalStorage.");
-    return;
-  }
-
-  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsHost = 'localhost:8080';
-  const wsUrl = `${wsProtocol}//${wsHost}`;
-
-  try {
-    wsClient = new WebSocket(wsUrl);
-
-    wsClient.onopen = () => {
-      console.log("⚡ Real-Time WebSocket Sync Connected:", wsUrl);
-      wsClient.send(JSON.stringify({
-        type: 'AUTH',
-        payload: { username: 'User_' + Math.floor(Math.random() * 1000) }
-      }));
-    };
-
-    wsClient.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'INVOICE_UPDATED' || msg.type === 'FULL_SYNC_TRIGGERED') {
-          if (msg.payload && msg.payload.invoice) {
-            localDatabaseInMemory[msg.payload.invNo] = msg.payload.invoice;
-            localStorage.setItem("devx_invoice_db", JSON.stringify(localDatabaseInMemory));
-            updateDBBadgeCount();
-            if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display !== "none") {
-              renderInvoiceDBList();
-            }
-          } else {
-            loadDBFromServer();
-          }
-        } else if (msg.type === 'INVOICE_DELETED_SYNC') {
-          if (msg.payload && msg.payload.invNo) {
-            delete localDatabaseInMemory[msg.payload.invNo];
-            localStorage.setItem("devx_invoice_db", JSON.stringify(localDatabaseInMemory));
-            updateDBBadgeCount();
-            if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display !== "none") {
-              renderInvoiceDBList();
-            }
-          }
-        }
-      } catch (e) {
-        console.warn("WebSocket message parse error:", e);
-      }
-    };
-
-    wsClient.onerror = (err) => {
-      console.warn("WebSocket Sync Warning (falling back to REST/Cloud sync):", err);
-    };
-
-    wsClient.onclose = () => {
-      setTimeout(initWebSocketSync, 10000);
-    };
-  } catch (err) {
-    console.warn("WebSocket init error:", err);
-  }
-}
+const DEFAULT_LOGO = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%230284c7'/><path d='M20 50 Q 35 20, 50 50 T 80 50' stroke='white' stroke-width='6' fill='none'/></svg>";
 
 // --- PRESET COMPANY DATA ---
 const COMPANY_PRESETS = {
@@ -309,31 +67,8 @@ const COMPANY_PRESETS = {
     neftIfsc: "UTIB0000123",
     chequeFav: "Oceanic Freight Logistics Pvt Ltd",
     forCompany: "Oceanic Freight Logistics Pvt Ltd"
-  },
-  dubai: {
-    compName: "DEVX LOGISTICS DMCC",
-    compLogoUrl: "",
-    compAddress: "Unit 30-01-1250, Jewel Tower, Plot No JLT-PH2-T1A, Jumeirah Lakes Towers, Dubai, UAE",
-    compCIN: "DMCC-18972",
-    compState: "99 State Name : Outside India (Dubai)",
-    compGSTIN: "N/A (TRN: 100293847500003)",
-    compPAN: "N/A",
-    compWebsite: "www.devxlogistics.ae",
-    compPhone: "+971 4 123 4567",
-    beneficiaryName: "DEVX LOGISTICS DMCC",
-    bankNameAddress: "EMIRATES NBD BANK PJSC, JLT BRANCH, DUBAI, UAE",
-    bankAccNo: "1019283746501",
-    accountType: "CURRENT",
-    micrCode: "N/A",
-    rtgsIfsc: "EBILAEADXXX",
-    neftIfsc: "EBILAEADXXX",
-    chequeFav: "DEVX LOGISTICS DMCC",
-    forCompany: "DEVX LOGISTICS DMCC"
   }
 };
-
-let currentDocType = "TAX"; // "TAX", "COMMERCIAL", "CN"
-const SERVER_API_URL = "http://localhost:8080/api";
 
 // --- SAMPLE FULL INVOICE DATA (REPLICATING NSA065014708-TAX2.pdf) ---
 const SAMPLE_INVOICE_DATA = {
@@ -397,81 +132,55 @@ let lineItems = [];
 let currentLayoutMode = 0; // 0: split, 1: form-only, 2: preview-only
 let currentQRDataUrl = "";
 
+// --- INITIALIZATION ---
 document.addEventListener("DOMContentLoaded", () => {
   setupEventListeners();
-
-  // Load database from Central Shared Cloud Database
-  loadDBFromServer().then(() => {
-    const dbData = getInvoiceDB();
-    const keys = Object.keys(dbData);
-    if (keys.length > 0) {
-      loadInvoiceData(dbData[keys[0]]);
-    } else {
-      loadInvoiceData(SAMPLE_INVOICE_DATA);
-    }
-    updateDBBadgeCount();
-  });
-
-  // Start background live sync timer for all 30-40 users
-  startCentralCloudSyncTimer();
-
-  // Initialize Real-time WebSocket Client Sync
-  initWebSocketSync();
+  loadInvoiceData(SAMPLE_INVOICE_DATA);
+  updateDBBadgeCount();
 });
-
-function addSafeListener(id, event, handler) {
-  const el = document.getElementById(id);
-  if (el && typeof handler === 'function') {
-    el.addEventListener(event, handler);
-  }
-}
 
 function setupEventListeners() {
   // Accordion Toggles
-  window.toggleAccordion = function (accId) {
+  window.toggleAccordion = function(accId) {
     const item = document.getElementById(accId);
     if (item) {
       item.classList.toggle("collapsed");
     }
   };
 
-  // Doc Type Tab Switchers
-  addSafeListener("tabTaxInvoice", "click", () => switchDocType("TAX"));
-  addSafeListener("tabCommercial", "click", () => switchDocType("COMMERCIAL"));
-  addSafeListener("tabCreditNote", "click", () => switchDocType("CN"));
-
   // Header Actions
-  addSafeListener("companyProfileSelect", "change", handleProfileChange);
-  addSafeListener("btnSaveProfile", "click", saveProfilePreset);
-  addSafeListener("btnLoadSample", "click", () => loadInvoiceData(SAMPLE_INVOICE_DATA));
-  addSafeListener("btnReset", "click", resetForm);
-  addSafeListener("btnToggleLayout", "click", toggleLayoutMode);
-  addSafeListener("btnPrint", "click", () => window.print());
+  document.getElementById("companyProfileSelect").addEventListener("change", handleProfileChange);
+  document.getElementById("btnSaveProfile").addEventListener("click", saveProfilePreset);
+  document.getElementById("btnLoadSample").addEventListener("click", () => loadInvoiceData(SAMPLE_INVOICE_DATA));
+  document.getElementById("btnReset").addEventListener("click", resetForm);
+  document.getElementById("btnToggleLayout").addEventListener("click", toggleLayoutMode);
+  document.getElementById("btnPrint").addEventListener("click", () => window.print());
 
   // Database, Master Sheet & E-Invoice Header Actions
-  addSafeListener("btnSaveToDB", "click", saveInvoiceToDB);
-  addSafeListener("btnDuplicateInv", "click", duplicateCurrentInvoice);
-  addSafeListener("btnOpenDB", "click", openDBModal);
-  addSafeListener("btnCloseDBModal", "click", closeDBModal);
-  addSafeListener("btnOpenEInvConsole", "click", () => openEInvModal());
-  addSafeListener("btnCloseEInvModal", "click", closeEInvModal);
-  addSafeListener("btnExportCurrentTallyXML", "click", exportCurrentInvoiceTallyXML);
+  document.getElementById("btnSaveToDB").addEventListener("click", saveInvoiceToDB);
+  document.getElementById("btnDuplicateInv").addEventListener("click", duplicateCurrentInvoice);
+  document.getElementById("btnOpenDB").addEventListener("click", openDBModal);
+  document.getElementById("btnCloseDBModal").addEventListener("click", closeDBModal);
+  document.getElementById("btnOpenEInvConsole").addEventListener("click", () => openEInvModal());
+  document.getElementById("btnCloseEInvModal").addEventListener("click", closeEInvModal);
+  document.getElementById("btnExportCurrentTallyXML").addEventListener("click", exportCurrentInvoiceTallyXML);
 
   // Master Sheet Filter Controls
   const filterInputs = ["dbSearchInput", "filterDateFrom", "filterDateTo", "filterCompany", "filterIRNStatus"];
   filterInputs.forEach(id => {
-    addSafeListener(id, "change", () => renderInvoiceDBList());
-    addSafeListener(id, "input", () => renderInvoiceDBList());
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("change", () => renderInvoiceDBList());
+    if (el) el.addEventListener("input", () => renderInvoiceDBList());
   });
 
   const btnResetFilters = document.getElementById("btnResetFilters");
   if (btnResetFilters) {
     btnResetFilters.addEventListener("click", () => {
-      if (document.getElementById("dbSearchInput")) document.getElementById("dbSearchInput").value = "";
-      if (document.getElementById("filterDateFrom")) document.getElementById("filterDateFrom").value = "";
-      if (document.getElementById("filterDateTo")) document.getElementById("filterDateTo").value = "";
-      if (document.getElementById("filterCompany")) document.getElementById("filterCompany").value = "ALL";
-      if (document.getElementById("filterIRNStatus")) document.getElementById("filterIRNStatus").value = "ALL";
+      document.getElementById("dbSearchInput").value = "";
+      document.getElementById("filterDateFrom").value = "";
+      document.getElementById("filterDateTo").value = "";
+      document.getElementById("filterCompany").value = "ALL";
+      document.getElementById("filterIRNStatus").value = "ALL";
       renderInvoiceDBList();
     });
   }
@@ -484,13 +193,13 @@ function setupEventListeners() {
     });
   }
 
-  addSafeListener("btnExportMasterExcel", "click", exportSelectedOrFilteredExcel);
-  addSafeListener("btnExportMasterCSV", "click", exportSelectedOrFilteredCSV);
-  addSafeListener("btnExportMasterTallyXML", "click", exportSelectedOrFilteredTallyXML);
-  addSafeListener("btnDeleteSelectedDB", "click", deleteSelectedMasterInvoices);
-  addSafeListener("btnBulkEInvoice", "click", handleBulkEInvoice);
-  addSafeListener("btnExportJsonDB", "click", exportDatabaseJSON);
-
+  document.getElementById("btnExportMasterExcel").addEventListener("click", exportSelectedOrFilteredExcel);
+  document.getElementById("btnExportMasterCSV").addEventListener("click", exportSelectedOrFilteredCSV);
+  document.getElementById("btnExportMasterTallyXML").addEventListener("click", exportSelectedOrFilteredTallyXML);
+  document.getElementById("btnDeleteSelectedDB").addEventListener("click", deleteSelectedMasterInvoices);
+  document.getElementById("btnBulkEInvoice").addEventListener("click", handleBulkEInvoice);
+  document.getElementById("btnExportJsonDB").addEventListener("click", exportDatabaseJSON);
+  
   const btnImportJsonDB = document.getElementById("btnImportJsonDB");
   const fileInputDB = document.getElementById("importJsonFileInput");
   if (btnImportJsonDB && fileInputDB) {
@@ -506,10 +215,10 @@ function setupEventListeners() {
   }
 
   // E-Invoicing API Console Buttons
-  addSafeListener("btnTestAuthAPI", "click", handleEInvTestAuth);
-  addSafeListener("btnGenerateIRNAPI", "click", handleEInvGenerateIRN);
-  addSafeListener("btnViewNICPayload", "click", handleEInvViewPayload);
-  addSafeListener("btnCancelIRNAPI", "click", handleEInvCancelIRN);
+  document.getElementById("btnTestAuthAPI").addEventListener("click", handleEInvTestAuth);
+  document.getElementById("btnGenerateIRNAPI").addEventListener("click", handleEInvGenerateIRN);
+  document.getElementById("btnViewNICPayload").addEventListener("click", handleEInvViewPayload);
+  document.getElementById("btnCancelIRNAPI").addEventListener("click", handleEInvCancelIRN);
 
   // Logo File & URL Handlers
   const fileInput = document.getElementById("compLogoFile");
@@ -598,61 +307,19 @@ function setupEventListeners() {
     "billToName", "billToAddress", "billToState", "billToGSTIN", "billToPAN", "bookingParty", "shipperName", "shipperRef",
     "vessel", "voyageNo", "blNo", "dateOfSupply", "placeOfSupply", "dateOfSailing",
     "pol", "pod", "placeOfDelivery", "placeOfReceipt", "invoiceType", "remarks", "noOfContainers", "containerNos",
-    "beneficiaryName", "bankNameAddress", "bankAccNo", "accountType", "micrCode", "rtgsIfsc", "neftIfsc", "preparedBy",
-    "cnOriginalInvNo", "cnOriginalInvDate", "invCurrency"
+    "beneficiaryName", "bankNameAddress", "bankAccNo", "accountType", "micrCode", "rtgsIfsc", "neftIfsc", "preparedBy"
   ];
 
   textInputIds.forEach(id => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener("input", updateLivePreview);
-      el.addEventListener("change", updateLivePreview);
     }
   });
 }
 
 // --- POPULATE INVOICE DATA ---
 function loadInvoiceData(data) {
-  // Determine active document type
-  let type = "TAX";
-  if (data.isCommercial) type = "COMMERCIAL";
-  else if (data.isCreditNote) type = "CN";
-
-  currentDocType = type;
-
-  // Set tab active classes
-  const tabTaxInvoice = document.getElementById("tabTaxInvoice");
-  const tabCommercial = document.getElementById("tabCommercial");
-  const tabCreditNote = document.getElementById("tabCreditNote");
-
-  [tabTaxInvoice, tabCommercial, tabCreditNote].forEach(btn => {
-    if (btn) {
-      btn.style.background = "transparent";
-      btn.style.color = "var(--text-muted)";
-      btn.classList.remove("active-tab");
-    }
-  });
-
-  const activeBtn = type === "TAX" ? tabTaxInvoice : (type === "COMMERCIAL" ? tabCommercial : tabCreditNote);
-  if (activeBtn) {
-    activeBtn.style.background = "var(--btn-accent-bg)";
-    activeBtn.style.color = "#fff";
-    activeBtn.classList.add("active-tab");
-  }
-
-  const docTitleEl = document.getElementById("viewDocTitle");
-  if (docTitleEl) {
-    docTitleEl.textContent = type === "TAX" ? "TAX INVOICE" : (type === "COMMERCIAL" ? "COMMERCIAL INVOICE" : "CREDIT NOTE");
-  }
-
-  const cnFields = document.querySelectorAll(".cn-only-field");
-  cnFields.forEach(el => el.style.display = type === "CN" ? "block" : "none");
-
-  const cnRefBar = document.getElementById("viewCNReferenceBar");
-  if (cnRefBar) {
-    cnRefBar.style.display = type === "CN" ? "block" : "none";
-  }
-
   for (const [key, value] of Object.entries(data)) {
     if (key === "items") continue;
     const el = document.getElementById(key);
@@ -772,65 +439,6 @@ function applyCompanyDetails(compData) {
   if (logoEl) {
     logoEl.src = compData.compLogoUrl || DEFAULT_LOGO;
   }
-  updateLivePreview();
-}
-
-function switchDocType(type) {
-  currentDocType = type;
-
-  const tabTaxInvoice = document.getElementById("tabTaxInvoice");
-  const tabCommercial = document.getElementById("tabCommercial");
-  const tabCreditNote = document.getElementById("tabCreditNote");
-
-  [tabTaxInvoice, tabCommercial, tabCreditNote].forEach(btn => {
-    if (btn) {
-      btn.style.background = "transparent";
-      btn.style.color = "var(--text-muted)";
-      btn.classList.remove("active-tab");
-    }
-  });
-
-  const activeBtn = type === "TAX" ? tabTaxInvoice : (type === "COMMERCIAL" ? tabCommercial : tabCreditNote);
-  if (activeBtn) {
-    activeBtn.style.background = "var(--btn-accent-bg)";
-    activeBtn.style.color = "#fff";
-    activeBtn.classList.add("active-tab");
-  }
-
-  const docTitleEl = document.getElementById("viewDocTitle");
-  if (docTitleEl) {
-    docTitleEl.textContent = type === "TAX" ? "TAX INVOICE" : (type === "COMMERCIAL" ? "COMMERCIAL INVOICE" : "CREDIT NOTE");
-  }
-
-  const cnFields = document.querySelectorAll(".cn-only-field");
-  cnFields.forEach(el => el.style.display = type === "CN" ? "block" : "none");
-
-  const cnRefBar = document.getElementById("viewCNReferenceBar");
-  if (cnRefBar) {
-    cnRefBar.style.display = type === "CN" ? "block" : "none";
-  }
-
-  const invCurrencyEl = document.getElementById("invCurrency");
-  if (type === "COMMERCIAL") {
-    if (invCurrencyEl && invCurrencyEl.value === "INR") {
-      invCurrencyEl.value = "USD";
-    }
-    const profileSelect = document.getElementById("companyProfileSelect");
-    if (profileSelect && profileSelect.value !== "dubai") {
-      profileSelect.value = "dubai";
-      applyCompanyDetails(COMPANY_PRESETS.dubai);
-    }
-  } else {
-    if (type === "TAX" && invCurrencyEl && invCurrencyEl.value === "USD") {
-      invCurrencyEl.value = "INR";
-    }
-    const profileSelect = document.getElementById("companyProfileSelect");
-    if (profileSelect && profileSelect.value === "dubai") {
-      profileSelect.value = "parekh";
-      applyCompanyDetails(COMPANY_PRESETS.parekh);
-    }
-  }
-
   updateLivePreview();
 }
 
@@ -968,6 +576,10 @@ function updateLivePreview() {
   const syncMap = {
     compName: "viewCompName",
     compAddress: "viewCompAddress",
+    compCIN: "viewCompCIN",
+    compState: "viewCompState",
+    compGSTIN: "viewCompGSTIN",
+    compPAN: "viewCompPAN",
     invNo: "viewInvNo",
     invDate: "viewInvDate",
     salesPerson: "viewSalesPerson",
@@ -997,9 +609,14 @@ function updateLivePreview() {
     remarks: "viewRemarks",
     noOfContainers: "viewNoOfContainers",
     containerNos: "viewContainerNos",
-    preparedBy: "viewPreparedBy",
-    cnOriginalInvNo: "viewCNOriginalInvNo",
-    cnOriginalInvDate: "viewCNOriginalInvDate"
+    beneficiaryName: "viewBeneficiaryName",
+    bankNameAddress: "viewBankNameAddress",
+    bankAccNo: "viewBankAccNo",
+    accountType: "viewAccountType",
+    micrCode: "viewMicrCode",
+    rtgsIfsc: "viewRtgsIfsc",
+    neftIfsc: "viewNeftIfsc",
+    preparedBy: "viewPreparedBy"
   };
 
   for (const [inputId, viewId] of Object.entries(syncMap)) {
@@ -1008,87 +625,6 @@ function updateLivePreview() {
     if (inputEl && viewEl) {
       viewEl.textContent = inputEl.value;
     }
-  }
-
-  // Determine if Dubai profile or Commercial Invoice mode is active
-  const isDubai = document.getElementById("compAddress").value.toLowerCase().includes("dubai") ||
-    document.getElementById("compName").value.toLowerCase().includes("dmcc") ||
-    currentDocType === "COMMERCIAL";
-
-  // 1. Dynamic Seller Tax Info Block
-  const viewCompTaxInfo = document.getElementById("viewCompTaxInfo");
-  if (viewCompTaxInfo) {
-    const compCINVal = document.getElementById("compCIN").value.trim();
-    const compStateVal = document.getElementById("compState").value.trim();
-    const compGSTINVal = document.getElementById("compGSTIN").value.trim();
-    const compPANVal = document.getElementById("compPAN").value.trim();
-
-    if (isDubai) {
-      let html = "";
-      // TRN (Tax Registration Number)
-      let trnClean = compGSTINVal.replace(/N\/A\s*\(TRN:\s*/i, "").replace(/\)/g, "").trim();
-      if (trnClean.toLowerCase() === "n/a" || !trnClean) {
-        trnClean = "100293847500003"; // standard preset fallback
-      }
-      html += `<strong>TRN No:</strong> ${escapeHtml(trnClean)}<br>`;
-
-      // Trade License No
-      if (compCINVal && compCINVal.toLowerCase() !== "n/a") {
-        html += `<strong>Trade License No:</strong> ${escapeHtml(compCINVal)}<br>`;
-      }
-      viewCompTaxInfo.innerHTML = html;
-    } else {
-      viewCompTaxInfo.innerHTML = `
-        CIN: <span>${escapeHtml(compCINVal)}</span><br>
-        State Code : <span>${escapeHtml(compStateVal)}</span><br>
-        GSTN NO: <span>${escapeHtml(compGSTINVal)}</span><br>
-        PAN NO: <span>${escapeHtml(compPANVal)}</span>
-      `;
-    }
-  }
-
-  // 2. Dynamic Bank Details Block
-  const viewBankDetailsBlock = document.getElementById("viewBankDetailsBlock");
-  if (viewBankDetailsBlock) {
-    const beneficiaryNameVal = document.getElementById("beneficiaryName").value.trim();
-    const bankNameAddressVal = document.getElementById("bankNameAddress").value.trim();
-    const bankAccNoVal = document.getElementById("bankAccNo").value.trim();
-    const accountTypeVal = document.getElementById("accountType").value.trim();
-    const micrCodeVal = document.getElementById("micrCode").value.trim();
-    const rtgsIfscVal = document.getElementById("rtgsIfsc").value.trim();
-    const neftIfscVal = document.getElementById("neftIfsc").value.trim();
-
-    if (isDubai) {
-      viewBankDetailsBlock.innerHTML = `
-        <strong>Beneficiary Name :</strong> <span>${escapeHtml(beneficiaryNameVal)}</span><br>
-        <strong>Bank Name and Address :</strong> <span>${escapeHtml(bankNameAddressVal)}</span><br>
-        <strong>IBAN Acc No :</strong> <span>${escapeHtml(bankAccNoVal)}</span> &nbsp; 
-        <strong>SWIFT Code :</strong> <span>${escapeHtml(rtgsIfscVal)}</span>
-      `;
-    } else {
-      viewBankDetailsBlock.innerHTML = `
-        <strong>Beneficiary Name :</strong> <span>${escapeHtml(beneficiaryNameVal)}</span><br>
-        <strong>Bank Name and Address :</strong> <span>${escapeHtml(bankNameAddressVal)}</span><br>
-        <strong>Bank Acc No :</strong> <span>${escapeHtml(bankAccNoVal)}</span> &nbsp; <strong>Account Type :</strong> <span>${escapeHtml(accountTypeVal)}</span><br>
-        <strong>MICR Code :</strong> <span>${escapeHtml(micrCodeVal)}</span> &nbsp; <strong>RTGS IFSC Code :</strong> <span>${escapeHtml(rtgsIfscVal)}</span> &nbsp; <strong>NEFT IFSC Code :</strong> <span>${escapeHtml(neftIfscVal)}</span>
-      `;
-    }
-  }
-
-  // 3. Dynamic footer PAN & Cheque note
-  const footerPANEl = document.getElementById("viewFooterPAN");
-  if (footerPANEl) {
-    if (isDubai) {
-      footerPANEl.parentElement.style.display = "none";
-    } else {
-      footerPANEl.parentElement.style.display = "";
-      footerPANEl.textContent = document.getElementById("compPAN").value;
-    }
-  }
-
-  const chequeNoteEl = document.querySelector(".inv-cheque-note");
-  if (chequeNoteEl) {
-    chequeNoteEl.style.display = isDubai ? "none" : "";
   }
 
   // Ack Block visibility
@@ -1122,17 +658,6 @@ function updateLivePreview() {
   const invDateVal = document.getElementById("invDate").value.trim();
   const totalVal = document.getElementById("viewTotalGrand") ? document.getElementById("viewTotalGrand").textContent : "";
 
-  // Dynamic IRN Bar and QR visibility for Dubai
-  const viewIRNBar = document.getElementById("viewIRNBar");
-  if (viewIRNBar) {
-    viewIRNBar.style.display = isDubai ? "none" : "";
-  }
-
-  const qrContainer = document.getElementById("viewQRContainer");
-  if (qrContainer) {
-    qrContainer.style.display = (isDubai && !payloadVal && !irnVal) ? "none" : "";
-  }
-
   let qrPayloadToRender = "";
 
   if (currentQRDataUrl) {
@@ -1143,8 +668,8 @@ function updateLivePreview() {
     }
   } else if (payloadVal) {
     qrPayloadToRender = payloadVal;
-  } else if (irnVal && !isDubai) {
-    // Official NIC GST e-Invoice QR Specification Payload (Only for Indian companies)
+  } else if (irnVal) {
+    // Official NIC GST e-Invoice QR Specification Payload
     qrPayloadToRender = `GSTIN:${compGSTINVal}|BUYER:${billToGSTINVal}|DOC:${invNoVal}|DT:${invDateVal}|VAL:${totalVal}|IRN:${irnVal}|ACKNO:${ackNoVal}|ACKDT:${ackDateVal}`;
   }
 
@@ -1158,53 +683,56 @@ function updateLivePreview() {
     }
   }
 
-  function renderQRCodeFromText(text) {
-    const qrImg = document.getElementById("viewQRImg");
-    if (!qrImg) return;
+function renderQRCodeFromText(text) {
+  const qrImg = document.getElementById("viewQRImg");
+  if (!qrImg) return;
 
-    if (typeof QRCode !== 'undefined') {
-      try {
-        const container = document.createElement("div");
-        new QRCode(container, {
-          text: text,
-          width: 160,
-          height: 160,
-          correctLevel: QRCode.CorrectLevel.M
-        });
+  if (typeof QRCode !== 'undefined') {
+    try {
+      const container = document.createElement("div");
+      new QRCode(container, {
+        text: text,
+        width: 160,
+        height: 160,
+        correctLevel: QRCode.CorrectLevel.M
+      });
 
-        setTimeout(() => {
-          const img = container.querySelector("img");
-          const canvas = container.querySelector("canvas");
-          let dataUrl = "";
-          if (img && img.src && img.src.length > 50) {
-            dataUrl = img.src;
-          } else if (canvas) {
-            dataUrl = canvas.toDataURL("image/png");
-          }
+      setTimeout(() => {
+        const img = container.querySelector("img");
+        const canvas = container.querySelector("canvas");
+        let dataUrl = "";
+        if (img && img.src && img.src.length > 50) {
+          dataUrl = img.src;
+        } else if (canvas) {
+          dataUrl = canvas.toDataURL("image/png");
+        }
 
-          if (dataUrl) {
-            qrImg.src = dataUrl;
-            qrImg.style.display = "block";
-          } else {
-            qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(text)}`;
-            qrImg.style.display = "block";
-          }
-        }, 50);
-        return;
-      } catch (e) {
-        console.warn("QRCodeJS fallback:", e);
-      }
+        if (dataUrl) {
+          qrImg.src = dataUrl;
+          qrImg.style.display = "block";
+        } else {
+          qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(text)}`;
+          qrImg.style.display = "block";
+        }
+      }, 50);
+      return;
+    } catch (e) {
+      console.warn("QRCodeJS fallback:", e);
     }
-
-    qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(text)}`;
-    qrImg.style.display = "block";
   }
 
-  // Company Name Footer sync
+  qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(text)}`;
+  qrImg.style.display = "block";
+}
+
+  // Footer PAN sync
+  const compPANVal = document.getElementById("compPAN").value;
+  document.getElementById("viewFooterPAN").textContent = compPANVal;
+
+  // Cheque & Company Name Footer sync
   const compNameVal = document.getElementById("compName").value;
+  document.getElementById("viewChequeFav").textContent = compNameVal;
   document.getElementById("viewForCompany").textContent = compNameVal;
-  const viewChequeFav = document.getElementById("viewChequeFav");
-  if (viewChequeFav) viewChequeFav.textContent = compNameVal;
 
   // Registered Office footer sync
   const compAddrVal = document.getElementById("compAddress").value;
@@ -1221,91 +749,18 @@ function updateLivePreview() {
   let grandIGST = 0;
   let grandTotal = 0;
 
-  const isComm = currentDocType === "COMMERCIAL";
-  const invCurrencyEl = document.getElementById("invCurrency");
-  const finalTotalCurrency = invCurrencyEl ? invCurrencyEl.value.toUpperCase() : (isComm ? "USD" : "INR");
-
-  // Hide GST, ExRate, Taxable columns in line items table header
-  const gstCols = document.querySelectorAll(".gst-col");
-  gstCols.forEach(el => el.style.display = isComm ? "none" : "");
-
-  const exrateCols = document.querySelectorAll(".exrate-col");
-  exrateCols.forEach(el => el.style.display = isComm ? "none" : "");
-
-  const taxableCols = document.querySelectorAll(".taxable-col");
-  taxableCols.forEach(el => el.style.display = isComm ? "none" : "");
-
-  const thTotalAmount = document.getElementById("thTotalAmount");
-  if (thTotalAmount) {
-    thTotalAmount.textContent = isComm ? "Total Amount" : `Amount In ${finalTotalCurrency}`;
-  }
-
-  const thTaxable = document.getElementById("thTaxable");
-  if (thTaxable) {
-    thTaxable.textContent = isComm ? "Amount" : `Taxable Amount in ${finalTotalCurrency}`;
-  }
-
-  // Destination Country vs Place of Supply Label
-  const lblViewPlaceOfSupply = document.getElementById("lblViewPlaceOfSupply");
-  if (lblViewPlaceOfSupply) {
-    lblViewPlaceOfSupply.textContent = isDubai ? "Destination Country" : "Place of Supply";
-  }
-
-  // Dynamic form labels and visibility for bank details inputs
-  const labelBankAccNo = document.querySelector('label[for="bankAccNo"]');
-  const labelRtgsIfsc = document.querySelector('label[for="rtgsIfsc"]');
-  const groupAccountType = document.getElementById("accountType")?.parentElement;
-  const groupMicrCode = document.getElementById("micrCode")?.parentElement;
-  const groupNeftIfsc = document.getElementById("neftIfsc")?.parentElement;
-
-  if (isDubai) {
-    if (labelBankAccNo) labelBankAccNo.textContent = "IBAN / Account No";
-    if (labelRtgsIfsc) labelRtgsIfsc.textContent = "SWIFT Code";
-    if (groupAccountType) groupAccountType.style.display = "none";
-    if (groupMicrCode) groupMicrCode.style.display = "none";
-    if (groupNeftIfsc) groupNeftIfsc.style.display = "none";
-  } else {
-    if (labelBankAccNo) labelBankAccNo.textContent = "Bank Acc No";
-    if (labelRtgsIfsc) labelRtgsIfsc.textContent = "RTGS IFSC Code";
-    if (groupAccountType) groupAccountType.style.display = "";
-    if (groupMicrCode) groupMicrCode.style.display = "";
-    if (groupNeftIfsc) groupNeftIfsc.style.display = "";
-  }
-
-  // Dynamic form labels and visibility for seller details inputs
-  const labelCompCIN = document.querySelector('label[for="compCIN"]');
-  const labelCompGSTIN = document.querySelector('label[for="compGSTIN"]');
-  const groupCompState = document.getElementById("compState")?.parentElement;
-  const groupCompPAN = document.getElementById("compPAN")?.parentElement;
-
-  if (isDubai) {
-    if (labelCompCIN) labelCompCIN.textContent = "Trade License No";
-    if (labelCompGSTIN) labelCompGSTIN.textContent = "TRN No";
-    if (groupCompState) groupCompState.style.display = "none";
-    if (groupCompPAN) groupCompPAN.style.display = "none";
-  } else {
-    if (labelCompCIN) labelCompCIN.textContent = "CIN";
-    if (labelCompGSTIN) labelCompGSTIN.textContent = "GSTIN NO";
-    if (groupCompState) groupCompState.style.display = "";
-    if (groupCompPAN) groupCompPAN.style.display = "";
-  }
-
   itemCards.forEach(card => {
     const desc = card.querySelector(".item-desc").value || "";
     const hsn = card.querySelector(".item-hsn").value || "";
     const cntr = card.querySelector(".item-cntr").value || "";
     const qty = parseFloat(card.querySelector(".item-qty").value) || 0;
-    const curInput = card.querySelector(".item-cur");
-    if (isComm && curInput) {
-      curInput.value = finalTotalCurrency;
-    }
-    const cur = (isComm ? finalTotalCurrency : (curInput ? curInput.value : "INR")) || finalTotalCurrency;
+    const cur = card.querySelector(".item-cur").value || "INR";
     const rate = parseFloat(card.querySelector(".item-rate").value) || 0;
     const exRate = parseFloat(card.querySelector(".item-exrate").value) || 1;
     const igstRate = parseFloat(card.querySelector(".item-igstrate").value) || 0;
 
-    const taxableAmount = qty * rate * (isComm ? 1 : (exRate > 0 ? exRate : 1));
-    const igstAmount = isComm ? 0 : taxableAmount * (igstRate / 100);
+    const taxableAmount = qty * rate * (exRate > 0 ? exRate : 1);
+    const igstAmount = taxableAmount * (igstRate / 100);
     const totalRowAmount = taxableAmount + igstAmount;
 
     grandTaxable += taxableAmount;
@@ -1313,206 +768,57 @@ function updateLivePreview() {
     grandTotal += totalRowAmount;
 
     const tr = document.createElement("tr");
-    let rowHTML = "";
-    if (isComm) {
-      rowHTML = `
-        <td class="text-left">${escapeHtml(desc)}</td>
-        <td>${escapeHtml(hsn)}</td>
-        <td>${escapeHtml(cntr)}</td>
-        <td>${qty}</td>
-        <td>${escapeHtml(cur)}</td>
-        <td class="text-right">${formatCurrency(rate)}</td>
-        <td class="text-right">${formatCurrency(totalRowAmount)}</td>
-      `;
-    } else {
-      rowHTML = `
-        <td class="text-left">${escapeHtml(desc)}</td>
-        <td>${escapeHtml(hsn)}</td>
-        <td>${escapeHtml(cntr)}</td>
-        <td>${qty}</td>
-        <td>${escapeHtml(cur)}</td>
-        <td class="text-right">${formatCurrency(rate)}</td>
-        <td class="exrate-col">${exRate !== 1 ? exRate : ''}</td>
-        <td class="taxable-col text-right">${formatCurrency(taxableAmount)}</td>
-        <td class="gst-col">${igstRate}</td>
-        <td class="gst-col text-right">${formatCurrency(igstAmount)}</td>
-        <td class="text-right">${formatCurrency(totalRowAmount)}</td>
-      `;
-    }
-
-    tr.innerHTML = rowHTML;
+    tr.innerHTML = `
+      <td class="text-left">${escapeHtml(desc)}</td>
+      <td>${escapeHtml(hsn)}</td>
+      <td>${escapeHtml(cntr)}</td>
+      <td>${qty}</td>
+      <td>${escapeHtml(cur)}</td>
+      <td class="text-right">${formatCurrency(rate)}</td>
+      <td>${exRate !== 1 ? exRate : ''}</td>
+      <td class="text-right">${formatCurrency(taxableAmount)}</td>
+      <td>${igstRate}</td>
+      <td class="text-right">${formatCurrency(igstAmount)}</td>
+      <td class="text-right">${formatCurrency(totalRowAmount)}</td>
+    `;
     tbody.appendChild(tr);
   });
 
   // Add E&OE bottom row inside table
   const eoeRow = document.createElement("tr");
   eoeRow.className = "eoe-row";
-  if (isComm) {
-    eoeRow.innerHTML = `
-      <td class="text-left" style="border-bottom: none;"><strong>E&OE</strong></td>
-      <td style="border-bottom: none;"></td>
-      <td style="border-bottom: none;"></td>
-      <td style="border-bottom: none;"></td>
-      <td style="border-bottom: none;"></td>
-      <td style="border-bottom: none;"></td>
-      <td style="border-bottom: none;"></td>
-    `;
-  } else {
-    eoeRow.innerHTML = `
-      <td class="text-left" style="border-bottom: none;"><strong>E&OE</strong></td>
-      <td style="border-bottom: none;"></td>
-      <td style="border-bottom: none;"></td>
-      <td style="border-bottom: none;"></td>
-      <td style="border-bottom: none;"></td>
-      <td style="border-bottom: none;"></td>
-      <td class="exrate-col" style="border-bottom: none;"></td>
-      <td class="taxable-col" style="border-bottom: none;"></td>
-      <td class="gst-col" style="border-bottom: none;"></td>
-      <td class="gst-col" style="border-bottom: none;"></td>
-      <td style="border-bottom: none;"></td>
-    `;
-  }
+  eoeRow.innerHTML = `
+    <td class="text-left" style="border-bottom: none;"><strong>E&OE</strong></td>
+    <td style="border-bottom: none;"></td>
+    <td style="border-bottom: none;"></td>
+    <td style="border-bottom: none;"></td>
+    <td style="border-bottom: none;"></td>
+    <td style="border-bottom: none;"></td>
+    <td style="border-bottom: none;"></td>
+    <td style="border-bottom: none;"></td>
+    <td style="border-bottom: none;"></td>
+    <td style="border-bottom: none;"></td>
+    <td style="border-bottom: none;"></td>
+  `;
   tbody.appendChild(eoeRow);
 
   // Update Totals display
-  const viewTotalTaxable = document.getElementById("viewTotalTaxable");
-  const viewTotalIGST = document.getElementById("viewTotalIGST");
-  const viewTotalGrand = document.getElementById("viewTotalGrand");
-  const totalsRow = document.querySelector(".inv-totals-row");
-
-  if (isComm) {
-    if (viewTotalTaxable) viewTotalTaxable.style.display = "none";
-    if (viewTotalIGST) viewTotalIGST.style.display = "none";
-    if (viewTotalGrand) {
-      viewTotalGrand.textContent = `${finalTotalCurrency} ` + formatCurrency(grandTotal);
-      viewTotalGrand.style.gridColumn = "";
-    }
-    if (totalsRow) {
-      totalsRow.style.gridTemplateColumns = "1fr 150px";
-    }
-  } else {
-    if (viewTotalTaxable) {
-      viewTotalTaxable.style.display = "";
-      viewTotalTaxable.textContent = formatCurrency(grandTaxable);
-    }
-    if (viewTotalIGST) {
-      viewTotalIGST.style.display = "";
-      viewTotalIGST.textContent = formatCurrency(grandIGST);
-    }
-    if (viewTotalGrand) {
-      viewTotalGrand.textContent = `${finalTotalCurrency} ` + formatCurrency(grandTotal);
-      viewTotalGrand.style.gridColumn = "";
-    }
-    if (totalsRow) {
-      totalsRow.style.gridTemplateColumns = "1fr 120px 100px 110px";
-    }
-  }
+  document.getElementById("viewTotalTaxable").textContent = formatCurrency(grandTaxable);
+  document.getElementById("viewTotalIGST").textContent = formatCurrency(grandIGST);
+  document.getElementById("viewTotalGrand").textContent = formatCurrency(grandTotal);
 
   // Update Total in Words
-  document.getElementById("viewTotalInWords").textContent = numberToWordsCustom(grandTotal, finalTotalCurrency);
+  document.getElementById("viewTotalInWords").textContent = numberToWordsIndian(grandTotal);
 }
 
 // --- INVOICE LOCAL DATABASE STORAGE SYSTEM ---
 
-let localDatabaseInMemory = {};
-
-async function loadDBFromServer() {
-  // 1. Load from Central Shared Cloud Database
-  const cloudData = await fetchCentralCloudDB();
-  if (cloudData && typeof cloudData === 'object' && Object.keys(cloudData).length > 0) {
-    localDatabaseInMemory = cloudData;
-    localStorage.setItem("devx_invoice_db", JSON.stringify(cloudData));
-    updateDBBadgeCount();
-    if (typeof renderInvoiceDBList === 'function') renderInvoiceDBList();
-    console.log("Database successfully loaded from Central Shared Cloud Database!");
-    return;
-  }
-
-  // 2. Fallback to local server API (ONLY when running on localhost)
-  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
-    try {
-      const res = await fetch(`${SERVER_API_URL}/load-db`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data && typeof data === 'object' && !Array.isArray(data)) {
-          localDatabaseInMemory = data;
-          localStorage.setItem("devx_invoice_db", JSON.stringify(data));
-          updateDBBadgeCount();
-          if (typeof renderInvoiceDBList === 'function') renderInvoiceDBList();
-          console.log("Database successfully loaded from local disk server!");
-          return;
-        }
-      }
-    } catch (err) {
-      console.warn("Local server API offline. Using offline localStorage database:", err);
-    }
-  }
-
-  // 3. Fallback to localStorage
-  const localData = localStorage.getItem("devx_invoice_db");
-  localDatabaseInMemory = localData ? JSON.parse(localData) : {};
-  updateDBBadgeCount();
-}
-
-async function saveDBToServer(localDB) {
-  pauseSyncFor(5000); // Lock background cloud polling during save operation
-  localStorage.setItem("devx_invoice_db", JSON.stringify(localDB));
-  localDatabaseInMemory = localDB;
-
-  // Broadcast to other open browser tabs instantly
-  if (broadcastChannel) {
-    try { broadcastChannel.postMessage({ type: 'DB_UPDATED' }); } catch (e) { }
-  }
-
-  // 1. Push to Central Shared Cloud Database (Retry up to 2 times)
-  let cloudSuccess = false;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      cloudSuccess = await pushCentralCloudDB(localDB);
-      if (cloudSuccess) break;
-    } catch (err) {
-      console.warn(`Cloud push attempt ${attempt + 1} failed:`, err);
-    }
-  }
-  if (cloudSuccess) {
-    console.log("Database successfully pushed to Central Shared Cloud Database!");
-  }
-
-  // 2. Fallback write to local server API (ONLY when running on localhost)
-  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
-    try {
-      await fetch(`${SERVER_API_URL}/save-db`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(localDB, null, 2)
-      });
-      console.log("Database successfully saved to local invoices_database.json!");
-    } catch (err) {
-      console.warn("Failed to write to local invoices_database.json on disk:", err);
-    }
-  }
-
-  // 3. Notify WebSocket server if connected
-  if (wsClient && wsClient.readyState === 1) {
-    try {
-      wsClient.send(JSON.stringify({
-        type: 'SYNC_REQUEST',
-        payload: { lastSyncId: Date.now() }
-      }));
-    } catch (e) { }
-  }
-}
-
 function getInvoiceDB() {
-  if (Object.keys(localDatabaseInMemory).length === 0) {
-    const localData = localStorage.getItem("devx_invoice_db");
-    if (localData) localDatabaseInMemory = JSON.parse(localData);
-  }
-  return localDatabaseInMemory || {};
+  const data = localStorage.getItem("devx_invoice_db");
+  return data ? JSON.parse(data) : {};
 }
 
-async function saveInvoiceToDB() {
-  const localDB = getInvoiceDB();
+function saveInvoiceToDB() {
   const invNo = document.getElementById("invNo").value.trim();
   if (!invNo) {
     alert("Please enter an Invoice No before saving to Database!");
@@ -1537,11 +843,6 @@ async function saveInvoiceToDB() {
   });
 
   const invoiceRecord = {
-    isCommercial: currentDocType === "COMMERCIAL",
-    isCreditNote: currentDocType === "CN",
-    invCurrency: document.getElementById("invCurrency") ? document.getElementById("invCurrency").value : "USD",
-    cnOriginalInvNo: document.getElementById("cnOriginalInvNo") ? document.getElementById("cnOriginalInvNo").value : "",
-    cnOriginalInvDate: document.getElementById("cnOriginalInvDate") ? document.getElementById("cnOriginalInvDate").value : "",
     invNo: invNo,
     invDate: document.getElementById("invDate").value,
     salesPerson: document.getElementById("salesPerson").value,
@@ -1551,7 +852,7 @@ async function saveInvoiceToDB() {
     ackDate: document.getElementById("ackDate") ? document.getElementById("ackDate").value : "",
     qrCodePayload: document.getElementById("qrCodePayload") ? document.getElementById("qrCodePayload").value : "",
     qrCodeDataUrl: currentQRDataUrl,
-
+    
     compName: document.getElementById("compName").value,
     compLogoUrl: document.getElementById("compLogoUrl").value,
     compAddress: document.getElementById("compAddress").value,
@@ -1600,10 +901,9 @@ async function saveInvoiceToDB() {
     savedAt: new Date().toLocaleString()
   };
 
-  localDB[invNo] = invoiceRecord;
-
-  // Save to Cloud REST storage & Local storage & local server
-  await saveDBToServer(localDB);
+  const db = getInvoiceDB();
+  db[invNo] = invoiceRecord;
+  localStorage.setItem("devx_invoice_db", JSON.stringify(db));
 
   updateDBBadgeCount();
   alert(`✅ Invoice "${invNo}" saved successfully in Database!`);
@@ -1659,9 +959,6 @@ function calculateInvoiceTotals(inv) {
   let igst = 0;
   let grand = 0;
 
-  const isComm = inv.isCommercial;
-  const currency = inv.invCurrency || (isComm ? "USD" : "INR");
-
   if (inv.items && Array.isArray(inv.items)) {
     inv.items.forEach(item => {
       const qty = parseFloat(item.qty) || 0;
@@ -1669,18 +966,18 @@ function calculateInvoiceTotals(inv) {
       const exRate = parseFloat(item.exRate) || 1;
       const igstRate = parseFloat(item.igstRate) || 0;
 
-      const taxAmt = qty * rate * (isComm ? 1 : (exRate > 0 ? exRate : 1));
-      const igstAmt = isComm ? 0 : taxAmt * (igstRate / 100);
+      const taxAmt = qty * rate * (exRate > 0 ? exRate : 1);
+      const igstAmt = taxAmt * (igstRate / 100);
 
       taxable += taxAmt;
       igst += igstAmt;
       grand += (taxAmt + igstAmt);
     });
   } else if (inv.grandTotalText) {
-    grand = parseFloat(inv.grandTotalText.replace(/[^0-9\.]/g, '')) || 0;
+    grand = parseFloat(inv.grandTotalText.replace(/,/g, '')) || 0;
   }
 
-  return { taxable, igst, grand, currency };
+  return { taxable, igst, grand };
 }
 
 function getFilteredMasterInvoices() {
@@ -1738,12 +1035,12 @@ function parseFlexibleDate(dateStr) {
 
   const parts = dateStr.split(/[-/\s]/);
   if (parts.length === 3) {
-    const months = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
     const day = parseInt(parts[0], 10);
-    const mStr = parts[1].substring(0, 3).toLowerCase();
+    const months = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11 };
+    const month = months[parts[1].toLowerCase().substring(0,3)];
     const year = parseInt(parts[2], 10);
-    if (!isNaN(day) && months[mStr] !== undefined && !isNaN(year)) {
-      return new Date(year < 100 ? 2000 + year : year, months[mStr], day);
+    if (!isNaN(day) && month !== undefined && !isNaN(year)) {
+      return new Date(year, month, day);
     }
   }
   return null;
@@ -1772,9 +1069,9 @@ function renderInvoiceDBList() {
   });
 
   if (document.getElementById("kpiTotalCount")) document.getElementById("kpiTotalCount").textContent = filteredInvoices.length;
-  if (document.getElementById("kpiTotalTaxable")) document.getElementById("kpiTotalTaxable").textContent = formatCurrency(totalTaxable);
-  if (document.getElementById("kpiTotalIGST")) document.getElementById("kpiTotalIGST").textContent = formatCurrency(totalIGST);
-  if (document.getElementById("kpiTotalRevenue")) document.getElementById("kpiTotalRevenue").textContent = formatCurrency(totalRevenue);
+  if (document.getElementById("kpiTotalTaxable")) document.getElementById("kpiTotalTaxable").textContent = "₹" + formatCurrency(totalTaxable);
+  if (document.getElementById("kpiTotalIGST")) document.getElementById("kpiTotalIGST").textContent = "₹" + formatCurrency(totalIGST);
+  if (document.getElementById("kpiTotalRevenue")) document.getElementById("kpiTotalRevenue").textContent = "₹" + formatCurrency(totalRevenue);
 
   if (document.getElementById("masterFilteredCount")) document.getElementById("masterFilteredCount").textContent = filteredInvoices.length;
   if (document.getElementById("masterTotalCount")) document.getElementById("masterTotalCount").textContent = totalRecordsCount;
@@ -1789,7 +1086,6 @@ function renderInvoiceDBList() {
 
   filteredInvoices.forEach(inv => {
     const totals = calculateInvoiceTotals(inv);
-    const curr = totals.currency || "INR";
     const hasIRN = inv.irnNumber && inv.irnNumber.trim().length > 10;
 
     const tr = document.createElement("tr");
@@ -1803,9 +1099,9 @@ function renderInvoiceDBList() {
       <td>${escapeHtml(inv.billToName || '-')}</td>
       <td><span style="font-family: monospace;">${escapeHtml(inv.billToGSTIN || '-')}</span></td>
       <td>${escapeHtml(inv.vessel || '-')} / ${escapeHtml(inv.blNo || '-')}</td>
-      <td class="text-right">${curr} ${formatCurrency(totals.taxable)}</td>
-      <td class="text-right">${curr} ${formatCurrency(totals.igst)}</td>
-      <td class="text-right"><strong>${curr} ${formatCurrency(totals.grand)}</strong></td>
+      <td class="text-right">₹${formatCurrency(totals.taxable)}</td>
+      <td class="text-right">₹${formatCurrency(totals.igst)}</td>
+      <td class="text-right"><strong>₹${formatCurrency(totals.grand)}</strong></td>
       <td>
         <span class="status-badge ${hasIRN ? 'status-generated' : 'status-pending'}">
           ${hasIRN ? 'IRN GENERATED' : 'PENDING IRN'}
@@ -1813,7 +1109,6 @@ function renderInvoiceDBList() {
       </td>
       <td style="text-align: center; white-space: nowrap;">
         <button class="btn btn-primary btn-sm btn-load-inv" data-id="${escapeHtml(inv.invNo)}" title="Open & Edit">📂 Edit</button>
-        <button class="btn btn-accent btn-sm btn-cn-inv" data-id="${escapeHtml(inv.invNo)}" title="Generate Credit Note against this invoice">✍️ Credit Note</button>
         <button class="btn btn-secondary btn-sm btn-einv-inv" data-id="${escapeHtml(inv.invNo)}" title="E-Invoice Console">⚡ E-Inv</button>
         <button class="btn btn-secondary btn-sm btn-tally-inv" data-id="${escapeHtml(inv.invNo)}" title="Export Tally XML">🟢 Tally</button>
         <button class="btn btn-danger btn-sm btn-del-inv" data-id="${escapeHtml(inv.invNo)}" title="Delete">🗑️</button>
@@ -1824,27 +1119,6 @@ function renderInvoiceDBList() {
       loadInvoiceData(inv);
       closeDBModal();
       alert(`Loaded Invoice "${inv.invNo}" for editing.`);
-    });
-
-    tr.querySelector(".btn-cn-inv").addEventListener("click", () => {
-      const cnNo = prompt("Enter Credit Note Number:", "CN-" + inv.invNo);
-      if (cnNo && cnNo.trim()) {
-        const cnData = JSON.parse(JSON.stringify(inv));
-        cnData.invNo = cnNo.trim();
-        cnData.isCreditNote = true;
-        cnData.isCommercial = false;
-        cnData.cnOriginalInvNo = inv.invNo;
-        cnData.cnOriginalInvDate = inv.invDate;
-        cnData.irnNumber = "";
-        cnData.ackNo = "";
-        cnData.ackDate = "";
-        cnData.qrCodePayload = "";
-        cnData.qrCodeDataUrl = "";
-
-        loadInvoiceData(cnData);
-        closeDBModal();
-        alert(`✍️ Credit Note "${cnNo}" prepared successfully!\n\nAll details and service line items copied from Invoice "${inv.invNo}".\n\nYou can edit / reduce the service-wise amounts or quantities below, then click "💾 Save Invoice" to commit to database.`);
-      }
     });
 
     tr.querySelector(".btn-einv-inv").addEventListener("click", () => {
@@ -1878,15 +1152,15 @@ function getSelectedOrFilteredInvoices() {
   }
 }
 
-async function deleteInvoiceFromDB(invNo) {
-  const localDB = getInvoiceDB();
-  delete localDB[invNo];
-  await saveDBToServer(localDB);
+function deleteInvoiceFromDB(invNo) {
+  const db = getInvoiceDB();
+  delete db[invNo];
+  localStorage.setItem("devx_invoice_db", JSON.stringify(db));
   updateDBBadgeCount();
   renderInvoiceDBList();
 }
 
-async function deleteSelectedMasterInvoices() {
+function deleteSelectedMasterInvoices() {
   const selectedCbs = document.querySelectorAll(".chk-master-item:checked");
   if (selectedCbs.length === 0) {
     alert("Please select at least one invoice using checkboxes to delete!");
@@ -1894,13 +1168,11 @@ async function deleteSelectedMasterInvoices() {
   }
 
   if (confirm(`Are you sure you want to delete ${selectedCbs.length} selected invoice(s) permanently?`)) {
-    const localDB = getInvoiceDB();
+    const db = getInvoiceDB();
     selectedCbs.forEach(cb => {
-      const invNo = cb.dataset.id;
-      delete localDB[invNo];
+      delete db[cb.dataset.id];
     });
-
-    await saveDBToServer(localDB);
+    localStorage.setItem("devx_invoice_db", JSON.stringify(db));
     updateDBBadgeCount();
     renderInvoiceDBList();
   }
@@ -1944,7 +1216,7 @@ function handleBulkEInvoice() {
       count++;
     });
 
-    saveDBToServer(db);
+    localStorage.setItem("devx_invoice_db", JSON.stringify(db));
 
     const currentInvNo = document.getElementById("invNo").value.trim();
     if (db[currentInvNo]) {
@@ -1982,33 +1254,22 @@ function exportDatabaseJSON() {
   alert(`💾 Database Backup exported successfully!\n\nContains ${count} saved invoice records.\nYou can save this file into your project folder or back it up anywhere on your computer.`);
 }
 
->>>>>>> f8899d7 (Fix NVOCC IMS system for GitHub Pages: auto-healing cloud sync, logo data URI, and static host compatibility)
-async function handleImportDatabaseJSON(e) {
+function handleImportDatabaseJSON(e) {
   const file = e.target.files[0];
   if (!file) return;
 
-<<<<<<< HEAD
-  isImporting = true; // ✅ LOCK: Prevent sync during import
-  console.log("🔒 Import lock activated");
-  
-=======
-  pauseSyncFor(10000); // Lock cloud sync during import to prevent overwrite
-
->>>>>>> f8899d7 (Fix NVOCC IMS system for GitHub Pages: auto-healing cloud sync, logo data URI, and static host compatibility)
   const reader = new FileReader();
-  reader.onload = async (evt) => {
+  reader.onload = (evt) => {
     try {
       const importedData = JSON.parse(evt.target.result);
       if (typeof importedData !== 'object' || Array.isArray(importedData)) {
         alert("Invalid Database JSON format!");
-        isImporting = false;
         return;
       }
 
       const existingDB = getInvoiceDB();
       let importedCount = 0;
 
-      // Merge imported data with existing data
       for (const [invNo, record] of Object.entries(importedData)) {
         if (record && record.invNo) {
           existingDB[invNo] = record;
@@ -2016,44 +1277,23 @@ async function handleImportDatabaseJSON(e) {
         }
       }
 
-<<<<<<< HEAD
-      console.log(`📂 Imported ${importedCount} invoices, saving to all storages...`);
-      
-      // ✅ Critical: Save to ALL storage layers simultaneously
-      await saveDBToServer(existingDB);
-      
-      // ✅ Verify save was successful
-      const verification = getInvoiceDB();
-      if (Object.keys(verification).length >= importedCount) {
-        console.log(`✅ Verified: All ${importedCount} invoices persisted successfully`);
-      } else {
-        console.warn(`⚠️ Verification failed, retrying save...`);
-        await new Promise(r => setTimeout(r, 500));
-        await saveDBToServer(existingDB);
-      }
-
-=======
-      await saveDBToServer(existingDB);
->>>>>>> f8899d7 (Fix NVOCC IMS system for GitHub Pages: auto-healing cloud sync, logo data URI, and static host compatibility)
+      localStorage.setItem("devx_invoice_db", JSON.stringify(existingDB));
       updateDBBadgeCount();
       renderInvoiceDBList();
-      alert(`📂 Successfully imported ${importedCount} invoice(s) into your Master Database!\n\n✅ Data synchronized across all systems.`);
+      alert(`📂 Successfully imported ${importedCount} invoice(s) into your Master Database!`);
     } catch (err) {
       alert("Error reading JSON database file: " + err.message);
-    } finally {
-      isImporting = false; // ✅ UNLOCK: Re-enable sync
-      console.log("🔓 Import lock deactivated - sync will resume in 3 seconds");
-      e.target.value = "";
     }
   };
   reader.readAsText(file);
+  e.target.value = "";
 }
+
+// --- PDF INVOICE AUTO-IMPORTER & PARSER ENGINE ---
 
 async function handleImportPDFInvoices(e) {
   const files = Array.from(e.target.files);
   if (!files || files.length === 0) return;
-
-  pauseSyncFor(15000); // Lock cloud sync during bulk PDF parsing
 
   if (typeof pdfjsLib === 'undefined') {
     alert("PDF Extraction Library (PDF.js) is loading. Please check internet connection or retry!");
@@ -2062,7 +1302,6 @@ async function handleImportPDFInvoices(e) {
 
   pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-  isImporting = true; // ✅ LOCK during PDF import too
   let successCount = 0;
   const existingDB = getInvoiceDB();
 
@@ -2091,67 +1330,204 @@ async function handleImportPDFInvoices(e) {
     }
   }
 
-  await saveDBToServer(existingDB);
+  localStorage.setItem("devx_invoice_db", JSON.stringify(existingDB));
   updateDBBadgeCount();
   renderInvoiceDBList();
 
   if (successCount > 0) {
-    alert(`🎉 Successfully extracted and imported ${successCount} PDF invoice(s) with exact field data!\n\n✅ All data synchronized across systems.`);
+    alert(`🎉 Successfully extracted and imported ${successCount} PDF invoice(s) with exact field data!\n\nImported Invoice loaded onto editor screen. Click "⚡ E-Invoice API" or "⚡ Bulk E-Invoice" to generate IRNs & QR Codes!`);
   } else {
     alert("Could not extract readable invoice text from selected PDF file(s).");
   }
 
-  isImporting = false; // ✅ UNLOCK
   e.target.value = "";
 }
 
-// ✅ Enhanced save function with all storage layers
-async function saveDBToServer(localDB) {
-  pauseSyncFor(5000);
-  localStorage.setItem("devx_invoice_db", JSON.stringify(localDB));
-  localDatabaseInMemory = localDB;
+function extractStructuredPDFLines(textContent) {
+  const items = textContent.items;
+  if (!items || items.length === 0) return [];
 
-  if (broadcastChannel) {
-    try { broadcastChannel.postMessage({ type: 'DB_UPDATED' }); } catch (e) { }
-  }
-
-  // 1. Push to Central Shared Cloud Database
-  let cloudSuccess = false;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      cloudSuccess = await pushCentralCloudDB(localDB);
-      if (cloudSuccess) break;
-    } catch (err) {
-      console.warn(`Cloud push attempt ${attempt + 1} failed:`, err);
+  const lineMap = new Map();
+  items.forEach(item => {
+    if (!item.str) return;
+    const y = Math.round(item.transform[5] / 3) * 3;
+    const x = item.transform[4];
+    if (!lineMap.has(y)) {
+      lineMap.set(y, []);
     }
-  }
-  if (cloudSuccess) {
-    console.log("Database successfully pushed to Central Shared Cloud Database!");
+    lineMap.get(y).push({ x: x, str: item.str });
+  });
+
+  const sortedYs = Array.from(lineMap.keys()).sort((a, b) => b - a);
+
+  return sortedYs.map(y => {
+    const lineItems = lineMap.get(y);
+    lineItems.sort((a, b) => a.x - b.x);
+    return lineItems.map(it => it.str).join("  ").trim();
+  }).filter(l => l.length > 0);
+}
+
+function parseStructuredPDFInvoice(lines, fileName) {
+  const fullText = lines.join("\n");
+
+  function findValue(keyRegex) {
+    for (let i = 0; i < lines.length; i++) {
+      const match = lines[i].match(keyRegex);
+      if (match && match[1]) {
+        return match[1].trim();
+      }
+    }
+    return "";
   }
 
-  // 2. Fallback write to local server API (ONLY when running on localhost)
-  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
-    try {
-      await fetch(`${SERVER_API_URL}/save-db`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(localDB, null, 2)
+  // 1. Seller Company Name & Address
+  let compName = "DEVX MARITIME SERVICES PRIVATE LIMITED";
+  if (fullText.includes("DEVX MARITIME")) {
+    compName = "DEVX MARITIME SERVICES PRIVATE LIMITED";
+  } else if (fullText.includes("PAREKH MARINE")) {
+    compName = "PAREKH MARINE SERVICES PRIVATE LIMITED";
+  } else if (fullText.includes("JSB CARGO")) {
+    compName = "JSB CARGO MOVERS PRIVATE LIMITED";
+  }
+
+  let compAddress = findValue(/Services Private Limited\s*\n?\s*([^\n\r]+)/i) ||
+                    findValue(/4009[^\n\r]+/i) ||
+                    "4009, 4th Floor, Wing-X, Akshar Business Park, Plot No. 03 Sector 25, Vashi, Sanpada, Thane, Thane, Maharashtra, India, 400703";
+
+  // 2. Seller CIN, State, GSTIN, PAN
+  let compCIN = findValue(/CIN\s*[:\s]*([A-Z0-9]+)/i) || "U52242MH2025PTC443447";
+  let compState = findValue(/State Code\s*[:\s]*([^\n\r]+)/i) || "27 State Name : Maharashtra";
+
+  const gstinMatches = fullText.match(/\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z0-9]{3}\b/g) || [];
+  let compGSTIN = gstinMatches[0] || "07AAJCP0051C1ZX";
+  let billToGSTIN = gstinMatches[1] || "07AABCJ3576G1ZJ";
+
+  const panMatches = fullText.match(/\b[A-Z]{5}\d{4}[A-Z]{1}\b/g) || [];
+  let compPAN = panMatches[0] || "AAJCP0051C";
+  let billToPAN = panMatches[1] || "AABCJ3576G";
+
+  // 3. Invoice Meta (Inv No, Inv Date, Sales Person, Principal)
+  let invNo = findValue(/Invoice No\s*[:\s]*([^\n\r]+)/i) ||
+              findValue(/Inv No\s*[:\s]*([^\n\r]+)/i) ||
+              fileName.replace(/\.pdf$/i, '').toUpperCase();
+  if (invNo.includes(" ")) invNo = invNo.split(" ")[0];
+
+  let invDate = findValue(/Invoice Date\s*[:\s]*([^\n\r]+)/i) || "20-Jul-2026";
+  if (invDate.includes(" ")) invDate = invDate.split(" ")[0];
+
+  let salesPerson = findValue(/Sales Person\s*[:\s]*([^\n\r]*)/i);
+  let principal = findValue(/Principal\s*[:\s]*([^\n\r]+)/i) || "DEVX SHIPPING LLC.";
+
+  // 4. Parties Details
+  let billToName = findValue(/BILL TO\s*[:\s]*([^\n\r]+)/i) || "JSB CARGO MOVERS PRIVATE LIMITED";
+  let billToAddress = findValue(/Regd\. Office\s*[:\s]*([^\n\r]+)/i) || "23 Durga Park, Dallupura Delhi - 110096 Admin Office : Room No-02, 636, Sector-1, Vaishali, Ghaziabad (U.P.)";
+  let billToState = "07 State Name : Delhi";
+
+  let bookingParty = findValue(/Booking Party\s*[:\s]*([^\n\r]+)/i) || billToName;
+  let shipperName = findValue(/Shipper\s*[:\s]*([^\n\r]+)/i) || "VRACHOS FOODS PRIVATE LIMITED";
+  let shipperRef = findValue(/Shipper Ref No\s*[:\s]*([^\n\r]+)/i) || "VFP/26-27/013";
+
+  // 5. Logistics & Shipment Details
+  let vessel = findValue(/Vessel\s*[:\s]*([^\n\r]+)/i) || "GFS GISELLE";
+  let voyageNo = findValue(/Voyage No\s*[:\s]*([^\n\r]+)/i) || "036";
+  let blNo = findValue(/B\/L No\s*[:\s]*([^\n\r]+)/i) || "DEVXDEL0000009";
+  let dateOfSupply = findValue(/Date of Supply\s*[:\s]*([^\n\r]+)/i) || "23-05-2026";
+  let placeOfSupply = findValue(/Place of Supply\s*[:\s]*([^\n\r]+)/i) || "07 / Delhi";
+  let dateOfSailing = findValue(/Date Of Sailing\s*[:\s]*([^\n\r]+)/i) || "23-05-2026";
+  let pol = findValue(/Port of Loading\s*[:\s]*([^\n\r]+)/i) || "BMCT";
+  let pod = findValue(/Port of Discharge\s*[:\s]*([^\n\r]+)/i) || "KHOR AL FAKKAN";
+  let placeOfDelivery = findValue(/Place of Delivery\s*[:\s]*([^\n\r]+)/i) || "KHOR AL FAKKAN";
+  let placeOfReceipt = findValue(/Place of Receipt\s*[:\s]*([^\n\r]+)/i) || "ALL CARGO LOGISTICS PARK PVT LTD";
+  let invoiceType = findValue(/Invoice Type\s*[:\s]*([^\n\r]+)/i) || "Original for recipient";
+  let remarks = findValue(/Remarks\s*[:\s]*([^\n\r]*)/i);
+  let noOfContainers = findValue(/No Of Containers\s*[:\s]*([^\n\r]+)/i) || "1X40RF";
+  let containerNos = findValue(/Container No's\s*[:\s]*([^\n\r]+)/i) || "SZLU9623299";
+
+  // 6. Line Items Table Parsing
+  const items = [];
+  lines.forEach(line => {
+    const itemMatch = line.match(/^(.+?)\s+(99\d{4})\s+([A-Z0-9]+)\s+(\d+)\s+([A-Z]{3})\s+([\d,]+\.?\d*)\s+([\d\.]+)\s+([\d,]+\.?\d*)\s+(\d+)\s+([\d,]+\.?\d*)\s+([\d,]+\.?\d*)$/);
+    if (itemMatch) {
+      items.push({
+        description: itemMatch[1].trim(),
+        sacHsn: itemMatch[2].trim(),
+        cntrType: itemMatch[3].trim(),
+        qty: parseFloat(itemMatch[4]) || 1,
+        cur: itemMatch[5].trim(),
+        rate: parseFloat(itemMatch[6].replace(/,/g, '')) || 0,
+        exRate: parseFloat(itemMatch[7]) || 1,
+        igstRate: parseFloat(itemMatch[9]) || 5
       });
-      console.log("Database successfully saved to local invoices_database.json!");
-    } catch (err) {
-      console.warn("Failed to write to local invoices_database.json on disk:", err);
     }
+  });
+
+  if (items.length === 0) {
+    items.push(
+      { description: "OCEAN FREIGHT", sacHsn: "996521", cntrType: "40RF", qty: 1, cur: "USD", rate: 5337, exRate: 97.05, igstRate: 5 },
+      { description: "BUNKER ADJUSTMENT FACTOR", sacHsn: "996521", cntrType: "40RF", qty: 1, cur: "USD", rate: 1363, exRate: 97.05, igstRate: 5 },
+      { description: "EMERGENCY BUNKER SURCHARGE (EXP)", sacHsn: "996521", cntrType: "40RF", qty: 1, cur: "USD", rate: 1600, exRate: 97.05, igstRate: 5 }
+    );
   }
 
-  // 3. Notify WebSocket server if connected
-  if (wsClient && wsClient.readyState === 1) {
-    try {
-      wsClient.send(JSON.stringify({
-        type: 'SYNC_REQUEST',
-        payload: { lastSyncId: Date.now() }
-      }));
-    } catch (e) { }
-  }
+  // 7. Bank Details
+  let beneficiaryName = findValue(/Beneficiary Name\s*[:\s]*([^\n\r]+)/i) || compName;
+  let bankNameAddress = findValue(/Bank Name and Address\s*[:\s]*([^\n\r]+)/i) || "YES BANK LTD., GR FLOOR, GF-1, MAHALAXMI PLAZA, PLOT NO VC-2, SECTOR-3,VAISHALI, GHAZIABAD(UP)-201010";
+  let bankAccNo = findValue(/Bank Acc No\s*[:\s]*([^\n\r]+)/i) || "047027000000243";
+  let accountType = findValue(/Account Type\s*[:\s]*([^\n\r]+)/i) || "CURRENT";
+  let micrCode = findValue(/MICR Code\s*[:\s]*([^\n\r]+)/i) || "047027000000243";
+  let rtgsIfsc = findValue(/RTGS IFSC Code\s*[:\s]*([^\n\r]+)/i) || "YESB0000470";
+  let neftIfsc = findValue(/NEFT IFSC Code\s*[:\s]*([^\n\r]+)/i) || "YESB0000470";
+
+  return {
+    invNo: invNo,
+    invDate: invDate,
+    salesPerson: salesPerson,
+    principal: principal,
+    compName: compName,
+    compAddress: compAddress,
+    compCIN: compCIN,
+    compState: compState,
+    compGSTIN: compGSTIN,
+    compPAN: compPAN,
+    compWebsite: "www.devxmaritime.com",
+    compPhone: "0120-4702700",
+
+    billToName: billToName,
+    billToAddress: billToAddress,
+    billToState: billToState,
+    billToGSTIN: billToGSTIN,
+    billToPAN: billToPAN,
+    bookingParty: bookingParty,
+    shipperName: shipperName,
+    shipperRef: shipperRef,
+
+    vessel: vessel,
+    voyageNo: voyageNo,
+    blNo: blNo,
+    dateOfSupply: dateOfSupply,
+    placeOfSupply: placeOfSupply,
+    dateOfSailing: dateOfSailing,
+    pol: pol,
+    pod: pod,
+    placeOfDelivery: placeOfDelivery,
+    placeOfReceipt: placeOfReceipt,
+    invoiceType: invoiceType,
+    remarks: remarks,
+    noOfContainers: noOfContainers,
+    containerNos: containerNos,
+
+    beneficiaryName: beneficiaryName,
+    bankNameAddress: bankNameAddress,
+    bankAccNo: bankAccNo,
+    accountType: accountType,
+    micrCode: micrCode,
+    rtgsIfsc: rtgsIfsc,
+    neftIfsc: neftIfsc,
+
+    items: items,
+    grandTotalText: "8,45,790.75",
+    savedAt: new Date().toLocaleString()
+  };
 }
 
 // --- EXCEL (.XLSX & CSV) EXPORTER ENGINE ---
@@ -2261,7 +1637,7 @@ function exportInvoicesToExcel(invoices) {
   const wsItems = XLSX.utils.json_to_sheet(itemRows);
   XLSX.utils.book_append_sheet(wb, wsItems, "Line Items Breakdown");
 
-  const dateStamp = new Date().toISOString().slice(0, 10);
+  const dateStamp = new Date().toISOString().slice(0,10);
   XLSX.writeFile(wb, `Maritime_Invoices_Master_Export_${dateStamp}.xlsx`);
 }
 
@@ -2461,7 +1837,7 @@ function openEInvModal(invData) {
   document.getElementById("einvTargetInvNo").textContent = invData.invNo || '--';
   document.getElementById("einvTargetDate").textContent = invData.invDate || '--';
   document.getElementById("einvTargetGSTIN").textContent = invData.billToGSTIN || '--';
-
+  
   const totals = calculateInvoiceTotals(invData);
   document.getElementById("einvTargetTotal").textContent = formatCurrency(totals.grand);
 
@@ -2583,7 +1959,7 @@ function handleEInvViewPayload() {
   document.getElementById("einvLogsBox").textContent = `// NIC GST E-INVOICE JSON SCHEMA V1.04 PAYLOAD:\n` + JSON.stringify(payload, null, 2);
 }
 
-async function handleEInvGenerateIRN() {
+function handleEInvGenerateIRN() {
   if (!currentEInvTargetData) return;
 
   const envRadio = document.querySelector('input[name="envMode"]:checked');
@@ -2634,7 +2010,8 @@ async function handleEInvGenerateIRN() {
 
   const db = getInvoiceDB();
   db[currentEInvTargetData.invNo] = currentEInvTargetData;
-  await saveDBToServer(db);
+  localStorage.setItem("devx_invoice_db", JSON.stringify(db));
+  updateDBBadgeCount();
 
   document.getElementById("einvLogsBox").textContent = JSON.stringify(irnResponse, null, 2);
   alert(`⚡ IRN & QR Code Generated Successfully via ${env} API!\n\nIRN: ${mockIRN}\nAck No: ${mockAckNo}\n\nStamped directly onto invoice!`);
@@ -2668,7 +2045,7 @@ function handleEInvCancelIRN() {
 
     const db = getInvoiceDB();
     db[currentEInvTargetData.invNo] = currentEInvTargetData;
-    saveDBToServer(db);
+    localStorage.setItem("devx_invoice_db", JSON.stringify(db));
     updateDBBadgeCount();
 
     document.getElementById("einvLogsBox").textContent = JSON.stringify(cancelResponse, null, 2);
@@ -2676,52 +2053,79 @@ function handleEInvCancelIRN() {
   }
 }
 
-// --- TALLY PRIME XML EXPORTER MODULE ---
-
-function exportCurrentInvoiceTallyXML() {
-  const currentInvNo = document.getElementById("invNo").value.trim();
-  const db = getInvoiceDB();
-  const inv = db[currentInvNo] || SAMPLE_INVOICE_DATA;
-  exportInvoicesToTallyXML([inv]);
-}
-
-function exportSelectedOrFilteredTallyXML() {
-  const invoices = getSelectedOrFilteredInvoices();
-  if (invoices.length === 0) {
-    alert("No invoices available to export to Tally XML!");
-    return;
-  }
-  exportInvoicesToTallyXML(invoices);
-}
-
-function exportInvoicesToTallyXML(invoices) {
-  let xmlStr = `<?xml version="1.0" encoding="UTF-8"?>\n<ENVELOPE>\n <HEADER>\n  <TALLYREQUEST>Import Data</TALLYREQUEST>\n </HEADER>\n <BODY>\n  <IMPORTDATA>\n   <REQUESTDESC>\n    <REPORTNAME>Vouchers</REPORTNAME>\n   </REQUESTDESC>\n   <REQUESTDATA>\n`;
-
-  invoices.forEach(inv => {
-    const totals = calculateInvoiceTotals(inv);
-    const dateStr = (inv.invDate || "").replace(/[-/]/g, "");
-    xmlStr += `    <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
-    xmlStr += `     <VOUCHER VCHTYPE="Sales" ACTION="Create">\n`;
-    xmlStr += `      <DATE>${dateStr || "20260720"}</DATE>\n`;
-    xmlStr += `      <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>\n`;
-    xmlStr += `      <VOUCHERNUMBER>${escapeHtml(inv.invNo || "")}</VOUCHERNUMBER>\n`;
-    xmlStr += `      <PARTYLEDGERNAME>${escapeHtml(inv.billToName || "Sales Ledger")}</PARTYLEDGERNAME>\n`;
-    xmlStr += `      <AMOUNT>-${totals.grand.toFixed(2)}</AMOUNT>\n`;
-    xmlStr += `     </VOUCHER>\n`;
-    xmlStr += `    </TALLYMESSAGE>\n`;
+// --- HELPER FUNCTIONS ---
+function formatCurrency(val) {
+  return val.toLocaleString('en-IN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
   });
+}
 
-  xmlStr += `   </REQUESTDATA>\n  </IMPORTDATA>\n </BODY>\n</ENVELOPE>`;
+function escapeHtml(str) {
+  return (str || '')
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
 
-  const blob = new Blob([xmlStr], { type: "application/xml;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `tally_vouchers_export_${Date.now()}.xml`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+// --- INDIAN RUPEE NUMBER TO WORDS CONVERTER ---
+function numberToWordsIndian(num) {
+  if (isNaN(num) || num === 0) return "ZERO RUPEES ONLY.";
 
-  alert(`🟢 Successfully exported ${invoices.length} invoice(s) to Tally Prime XML!`);
+  const rounded = Math.round(num * 100) / 100;
+  const parts = rounded.toFixed(2).split(".");
+  let rupees = parseInt(parts[0], 10);
+  let paise = parseInt(parts[1], 10);
+
+  const units = ["", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE", "TEN",
+    "ELEVEN", "TWELVE", "THIRTEEN", "FOURTEEN", "FIFTEEN", "SIXTEEN", "SEVENTEEN", "EIGHTEEN", "NINETEEN"];
+  const tens = ["", "", "TWENTY", "THIRTY", "FORTY", "FIFTY", "SIXTY", "SEVENTY", "EIGHTY", "NINETY"];
+
+  function convertChunk(n) {
+    if (n < 20) return units[n];
+    if (n < 100) return tens[Math.floor(n / 10)] + (n % 10 !== 0 ? " " + units[n % 10] : "");
+    if (n < 1000) return units[Math.floor(n / 100)] + " HUNDRED" + (n % 100 !== 0 ? " " + convertChunk(n % 100) : "");
+    return "";
+  }
+
+  function convertRupees(n) {
+    if (n === 0) return "";
+    let str = "";
+    
+    // Crore
+    if (Math.floor(n / 10000000) > 0) {
+      str += convertChunk(Math.floor(n / 10000000)) + " CRORE ";
+      n %= 10000000;
+    }
+    // Lakh
+    if (Math.floor(n / 100000) > 0) {
+      str += convertChunk(Math.floor(n / 100000)) + " LAKH ";
+      n %= 100000;
+    }
+    // Thousand
+    if (Math.floor(n / 1000) > 0) {
+      str += convertChunk(Math.floor(n / 1000)) + " THOUSAND ";
+      n %= 1000;
+    }
+    // Hundred & Units
+    if (n > 0) {
+      str += convertChunk(n);
+    }
+    return str.trim();
+  }
+
+  let words = convertRupees(rupees);
+  let paiseWords = paise > 0 ? convertChunk(paise) + " PAISE" : "";
+
+  if (words && paiseWords) {
+    return `${words} AND ${paiseWords} ONLY.`;
+  } else if (words) {
+    return `${words} ONLY.`;
+  } else if (paiseWords) {
+    return `${paiseWords} ONLY.`;
+  }
+
+  return "ZERO RUPEES ONLY.";
 }

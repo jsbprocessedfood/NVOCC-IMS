@@ -23,7 +23,7 @@
     <div class="brand-container">
       <div class="brand-icon">⚓</div>
       <div class="brand-title">
-        <h1>NVOCC IMS System</h1>
+        <h1>Devx Maritime Invoice Builder</h1>
         <p>Invoice Format Generator & Multi-Company Manager</p>
       </div>
     </div>
@@ -36,7 +36,6 @@
           <option value="parekh">Parekh Marine Services Pvt Ltd</option>
           <option value="jsb">JSB Cargo Movers Pvt Ltd</option>
           <option value="custom1">My Custom Company 1</option>
-          <option value="dubai">DEVX LOGISTICS DMCC (Dubai)</option>
           <option value="new">+ Add New Company Preset</option>
         </select>
       </div>
@@ -59,16 +58,9 @@
     
     <!-- LEFT PANEL: DATA ENTRY FORM EDITOR -->
     <aside class="form-panel">
-      <div class="panel-header" style="flex-direction: column; align-items: flex-start; gap: 0.65rem;">
-        <div style="display: flex; justify-content: space-between; width: 100%; align-items: center;">
-          <h2>✏️ Invoice Details Editor</h2>
-          <span style="font-size: 0.75rem; color: var(--text-muted);">Real-time Live Sync</span>
-        </div>
-        <div class="doc-tabs" style="display: flex; width: 100%; gap: 0.25rem; background: rgba(255, 255, 255, 0.05); padding: 0.25rem; border-radius: 6px; border: 1px solid var(--border-color);">
-          <button type="button" id="tabTaxInvoice" class="btn btn-secondary active-tab" style="flex: 1; padding: 0.45rem; font-size: 0.75rem; font-weight: 600; border-radius: 4px; border: none; cursor: pointer; text-align: center; background: var(--btn-accent-bg); color: #fff;">🇮🇳 Tax Invoice</button>
-          <button type="button" id="tabCommercial" class="btn btn-secondary" style="flex: 1; padding: 0.45rem; font-size: 0.75rem; font-weight: 600; border-radius: 4px; border: none; cursor: pointer; text-align: center; background: transparent; color: var(--text-muted);">🇦🇪 Commercial Invoice</button>
-          <button type="button" id="tabCreditNote" class="btn btn-secondary" style="flex: 1; padding: 0.45rem; font-size: 0.75rem; font-weight: 600; border-radius: 4px; border: none; cursor: pointer; text-align: center; background: transparent; color: var(--text-muted);">✍️ Credit Note</button>
-        </div>
+      <div class="panel-header">
+        <h2>✏️ Invoice Details Editor</h2>
+        <span style="font-size: 0.75rem; color: var(--text-muted);">Real-time Live Sync</span>
       </div>
 
       <div class="accordion">
@@ -140,25 +132,6 @@
               <div class="form-group">
                 <label for="invDate">Invoice Date</label>
                 <input type="text" id="invDate" class="form-control" placeholder="20-Jul-2026">
-              </div>
-              <div class="form-group">
-                <label for="invCurrency">Invoice Currency</label>
-                <select id="invCurrency" class="form-control">
-                  <option value="USD">USD ($)</option>
-                  <option value="AED">AED (Dhs)</option>
-                  <option value="EUR">EUR (€)</option>
-                  <option value="INR">INR (₹)</option>
-                  <option value="GBP">GBP (£)</option>
-                </select>
-              </div>
-              <!-- Credit Note References -->
-              <div class="form-group cn-only-field" style="display: none;">
-                <label for="cnOriginalInvNo">Original Invoice No Ref</label>
-                <input type="text" id="cnOriginalInvNo" class="form-control" placeholder="e.g. DVXM/26-27/0001">
-              </div>
-              <div class="form-group cn-only-field" style="display: none;">
-                <label for="cnOriginalInvDate">Original Invoice Date Ref</label>
-                <input type="text" id="cnOriginalInvDate" class="form-control" placeholder="20-Jul-2026">
               </div>
               <div class="form-group">
                 <label for="salesPerson">Sales Person</label>
@@ -389,8 +362,11 @@
             <div class="inv-company-details">
               <div class="inv-company-name" id="viewCompName">PAREKH MARINE SERVICES PRIVATE LIMITED</div>
               <div class="inv-company-address" id="viewCompAddress">Anchorage, CTS-275/B Village Deonar, Off. Govandi Station Rd, Govandi (E), Mumbai, Mumbai City, Maharashtra, India, 400088</div>
-              <div class="inv-company-taxinfo" id="viewCompTaxInfo">
-                <!-- Rendered dynamically depending on company profile -->
+              <div class="inv-company-taxinfo">
+                CIN: <span id="viewCompCIN">U74999MH2017PTC291606</span><br>
+                State Code : <span id="viewCompState">27 State Name : Maharashtra</span><br>
+                GSTN NO: <span id="viewCompGSTIN">27AAJCP0051C1ZV</span><br>
+                PAN NO: <span id="viewCompPAN">AAJCP0051C</span>
               </div>
             </div>
             <div class="inv-qr-box" id="viewQRContainer">
@@ -399,15 +375,12 @@
           </div>
 
           <!-- Document Title & IRN -->
-          <div class="inv-title" id="viewDocTitle">TAX INVOICE</div>
-          <div class="inv-irn-bar" id="viewIRNBar">
+          <div class="inv-title">TAX INVOICE</div>
+          <div class="inv-irn-bar">
             IRN : <span id="viewIRN">de2f556545dfed37631cba5cb3948473ba0cb3e78036e623dc2493c690f69c26</span>
             <span id="viewAckBlock" style="margin-left: 0.75rem;">
               | Ack No : <span id="viewAckNo">122610987654321</span> | Ack Date : <span id="viewAckDate">20-Jul-2026</span>
             </span>
-          </div>
-          <div class="cn-reference-bar" id="viewCNReferenceBar" style="display: none; background: #f3f4f6; color: #000; text-align: center; font-size: 0.75rem; font-weight: 600; padding: 4px; border-bottom: 1px solid #000; border-top: 1px solid #000; letter-spacing: 0.05em;">
-            ORIGINAL INVOICE REF: NO. <span id="viewCNOriginalInvNo">-</span> DATED <span id="viewCNOriginalInvDate">-</span>
           </div>
 
           <!-- 2-Column Parties & Invoice Meta Grid -->
@@ -482,7 +455,7 @@
                   <td class="kv-val" id="viewDateOfSupply">17-Jul-2026</td>
                 </tr>
                 <tr>
-                  <td class="kv-label" id="lblViewPlaceOfSupply">Place of Supply</td>
+                  <td class="kv-label">Place of Supply</td>
                   <td class="kv-sep">:</td>
                   <td class="kv-val" id="viewPlaceOfSupply">09 / Uttar Pradesh</td>
                 </tr>
@@ -555,11 +528,11 @@
                 <th style="width: 5%;">Qty</th>
                 <th style="width: 5%;">Cur</th>
                 <th style="width: 10%;">Amount Per Cntr</th>
-                <th class="exrate-col" style="width: 6%;">Ex Rate</th>
-                <th class="taxable-col" id="thTaxable" style="width: 11%;">Taxable Amount in INR</th>
-                <th class="gst-col" style="width: 6%;">IGST RATE</th>
-                <th class="gst-col" style="width: 8%;">IGST</th>
-                <th id="thTotalAmount" style="width: 13%;">Amount In INR</th>
+                <th style="width: 6%;">Ex Rate</th>
+                <th style="width: 11%;">Taxable Amount in INR</th>
+                <th style="width: 6%;">IGST RATE</th>
+                <th style="width: 8%;">IGST</th>
+                <th style="width: 13%;">Amount In INR</th>
               </tr>
             </thead>
             <tbody id="viewItemsBody">
@@ -579,8 +552,11 @@
 
           <!-- Footer Block -->
           <div class="inv-footer-section">
-            <div class="inv-bank-grid" id="viewBankDetailsBlock">
-              <!-- Rendered dynamically depending on company profile -->
+            <div class="inv-bank-grid">
+              <strong>Beneficiary Name :</strong> <span id="viewBeneficiaryName">PAREKH MARINE SERVICES PRIVATE LIMITED A/C ARKAS LINE</span><br>
+              <strong>Bank Name and Address :</strong> <span id="viewBankNameAddress">HDFC BANK LTD, GROUND FLOOR, JEHANGIR BLDG., M G ROAD, FORT, MUMBAI 400001</span><br>
+              <strong>Bank Acc No :</strong> <span id="viewBankAccNo">PARM62DEL</span> &nbsp; <strong>Account Type :</strong> <span id="viewAccountType">CURRENT</span><br>
+              <strong>MICR Code :</strong> <span id="viewMicrCode">400240015</span> &nbsp; <strong>RTGS IFSC Code :</strong> <span id="viewRtgsIfsc">HDFC0000240</span> &nbsp; <strong>NEFT IFSC Code :</strong> <span id="viewNeftIfsc">HDFC0000240</span>
             </div>
 
             <div class="inv-disclaimer-grid">
