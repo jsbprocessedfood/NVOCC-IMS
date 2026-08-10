@@ -26,6 +26,7 @@
         <h1>Devx Maritime Invoice Builder</h1>
         <p>Invoice Format Generator & Multi-Company Manager</p>
       </div>
+      <div id="centralSyncBadge" class="sync-status-badge status-syncing" title="Live Central Database Sync Status">🌐 Syncing DB...</div>
     </div>
 
     <div class="header-actions">
@@ -126,20 +127,41 @@
           <div class="accordion-body">
             <div class="form-grid">
               <div class="form-group">
-                <label for="invNo">Invoice No</label>
+                <label for="docType">Document Type</label>
+                <select id="docType" class="form-control">
+                  <option value="INVOICE">Tax Invoice</option>
+                  <option value="CREDIT_NOTE">Credit Note</option>
+                  <option value="COMMERCIAL_INVOICE">Commercial Invoice</option>
+                  <option value="DEBIT_NOTE">Debit Note</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="invNo">Document / Invoice No</label>
                 <input type="text" id="invNo" class="form-control" placeholder="BOMEX17260700399">
               </div>
               <div class="form-group">
-                <label for="invDate">Invoice Date</label>
+                <label for="invDate">Document Date</label>
                 <input type="text" id="invDate" class="form-control" placeholder="20-Jul-2026">
               </div>
               <div class="form-group">
                 <label for="salesPerson">Sales Person</label>
                 <input type="text" id="salesPerson" class="form-control" placeholder="">
               </div>
-              <div class="form-group">
+              <div class="form-group form-grid-full">
                 <label for="principal">Principal</label>
                 <input type="text" id="principal" class="form-control" placeholder="ARKAS CONTAINER TRANSPORT S.A.">
+              </div>
+            </div>
+
+            <!-- Conditional Credit Note Original Reference Fields -->
+            <div id="cnRefGroup" class="form-grid" style="display: none; background: rgba(239, 68, 68, 0.08); padding: 0.65rem; border-radius: 6px; margin: 0.5rem 0; border: 1px dashed rgba(239, 68, 68, 0.35);">
+              <div class="form-group">
+                <label for="cnOriginalInvNo" style="color: #fca5a5; font-weight: 600;">Original Invoice No (For Credit Note)</label>
+                <input type="text" id="cnOriginalInvNo" class="form-control" placeholder="BOMEX17260700399">
+              </div>
+              <div class="form-group">
+                <label for="cnOriginalInvDate" style="color: #fca5a5; font-weight: 600;">Original Invoice Date</label>
+                <input type="text" id="cnOriginalInvDate" class="form-control" placeholder="20-Jul-2026">
               </div>
             </div>
             <div class="form-group">
@@ -266,6 +288,24 @@
               <div class="form-group form-grid-full">
                 <label for="invoiceType">Invoice Type</label>
                 <input type="text" id="invoiceType" class="form-control" placeholder="Original for recipient">
+              </div>
+            </div>
+            <div class="form-grid" style="border-top: 1px solid var(--border-color); padding-top: 0.65rem; margin-top: 0.5rem; background: rgba(2, 132, 199, 0.05); padding: 0.65rem; border-radius: 6px;">
+              <div class="form-group">
+                <label for="portCode" style="color: var(--accent-color); font-weight: 600;">Port Code (Tally Prime)</label>
+                <input type="text" id="portCode" class="form-control" placeholder="INNSA1 / INBOM1">
+              </div>
+              <div class="form-group">
+                <label for="icdLocation" style="color: var(--accent-color); font-weight: 600;">ICD / Dry Port</label>
+                <input type="text" id="icdLocation" class="form-control" placeholder="ICD TUGHLAKABAD / ICD DADRI">
+              </div>
+              <div class="form-group">
+                <label for="shippingBillNo" style="color: var(--accent-color); font-weight: 600;">Shipping Bill No.</label>
+                <input type="text" id="shippingBillNo" class="form-control" placeholder="SB/2026/88912">
+              </div>
+              <div class="form-group">
+                <label for="shippingBillDate" style="color: var(--accent-color); font-weight: 600;">Shipping Bill Date</label>
+                <input type="text" id="shippingBillDate" class="form-control" placeholder="17-Jul-2026">
               </div>
             </div>
             <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 0.5rem 0;">
@@ -654,6 +694,16 @@
                 <option value="ALL">All Statuses</option>
                 <option value="GENERATED">IRN Generated</option>
                 <option value="PENDING">Pending IRN</option>
+              </select>
+            </div>
+            <div class="form-group mb-0">
+              <label style="font-size: 0.7rem;">📑 Doc Type</label>
+              <select id="filterDocType" class="btn-select">
+                <option value="ALL">All Document Types</option>
+                <option value="INVOICE">Tax Invoices</option>
+                <option value="CREDIT_NOTE">Credit Notes</option>
+                <option value="COMMERCIAL_INVOICE">Commercial Invoices</option>
+                <option value="DEBIT_NOTE">Debit Notes</option>
               </select>
             </div>
             <div class="form-group mb-0" style="align-self: flex-end;">

@@ -127,17 +127,136 @@ const SAMPLE_INVOICE_DATA = {
   ]
 };
 
-// Application State
+// Application State & Central Database Sync Engine
 let lineItems = [];
 let currentLayoutMode = 0; // 0: split, 1: form-only, 2: preview-only
 let currentQRDataUrl = "";
+let inMemoryDB = {};
+let centralWebSocket = null;
+let isCentralSyncActive = false;
 
 // --- INITIALIZATION ---
 document.addEventListener("DOMContentLoaded", () => {
   setupEventListeners();
   loadInvoiceData(SAMPLE_INVOICE_DATA);
-  updateDBBadgeCount();
+  initCentralDBSync();
 });
+
+function initCentralDBSync() {
+  updateSyncBadge("syncing", "🌐 Connecting Central DB...");
+
+  // 1. Fetch Central DB over REST API
+  fetch("/api/load-db")
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+      return res.json();
+    })
+    .then(data => {
+      if (data && typeof data === 'object') {
+        inMemoryDB = data;
+        localStorage.setItem("devx_invoice_db", JSON.stringify(inMemoryDB));
+        isCentralSyncActive = true;
+        updateSyncBadge("connected", `🟢 Central Sync: ${Object.keys(inMemoryDB).length} DB Records`);
+        updateDBBadgeCount();
+        if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display === "flex") {
+          renderInvoiceDBList();
+        }
+      }
+    })
+    .catch(err => {
+      console.warn("⚠️ Central REST DB fetch failed, falling back to LocalStorage cache:", err.message);
+      const cached = localStorage.getItem("devx_invoice_db");
+      inMemoryDB = cached ? JSON.parse(cached) : {};
+      updateSyncBadge("offline", `🔴 Central Offline (${Object.keys(inMemoryDB).length} Local)`);
+      updateDBBadgeCount();
+    });
+
+  // 2. Connect WebSocket for Real-Time Multi-User Sync
+  try {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsHost = window.location.hostname || 'localhost';
+    const wsPort = window.location.port || '8080';
+    const wsUrl = `${wsProtocol}//${wsHost}:${wsPort}`;
+
+    centralWebSocket = new WebSocket(wsUrl);
+
+    centralWebSocket.onopen = () => {
+      console.log("⚡ WebSocket Central Sync Connected!");
+      centralWebSocket.send(JSON.stringify({
+        type: 'AUTH',
+        payload: { username: 'SystemUser_' + Math.floor(Math.random() * 1000) }
+      }));
+    };
+
+    centralWebSocket.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        if (msg.type === 'FULL_SYNC' || msg.type === 'FULL_SYNC_TRIGGERED') {
+          if (msg.payload && typeof msg.payload === 'object') {
+            inMemoryDB = msg.payload;
+            localStorage.setItem("devx_invoice_db", JSON.stringify(inMemoryDB));
+            updateSyncBadge("connected", `🟢 Central Sync: ${Object.keys(inMemoryDB).length} DB Records`);
+            updateDBBadgeCount();
+            if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display === "flex") renderInvoiceDBList();
+          } else {
+            fetchCentralDB();
+          }
+        } else if (msg.type === 'INVOICE_UPDATED') {
+          if (msg.payload && msg.payload.invNo && msg.payload.invoice) {
+            inMemoryDB[msg.payload.invNo] = msg.payload.invoice;
+            localStorage.setItem("devx_invoice_db", JSON.stringify(inMemoryDB));
+            updateSyncBadge("connected", `🟢 Central Sync: ${Object.keys(inMemoryDB).length} DB Records`);
+            updateDBBadgeCount();
+            if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display === "flex") renderInvoiceDBList();
+          }
+        } else if (msg.type === 'INVOICE_DELETED_SYNC') {
+          if (msg.payload && msg.payload.invNo) {
+            delete inMemoryDB[msg.payload.invNo];
+            localStorage.setItem("devx_invoice_db", JSON.stringify(inMemoryDB));
+            updateSyncBadge("connected", `🟢 Central Sync: ${Object.keys(inMemoryDB).length} DB Records`);
+            updateDBBadgeCount();
+            if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display === "flex") renderInvoiceDBList();
+          }
+        }
+      } catch (e) {
+        console.error("Error parsing WebSocket message:", e);
+      }
+    };
+
+    centralWebSocket.onerror = () => {
+      updateSyncBadge("offline", `🔴 Central Offline (Local Mode)`);
+    };
+
+    centralWebSocket.onclose = () => {
+      updateSyncBadge("offline", `🔴 Central Disconnected`);
+      // Retry WebSocket connection after 5 seconds
+      setTimeout(initCentralDBSync, 5000);
+    };
+  } catch (err) {
+    console.warn("WebSocket init error:", err.message);
+  }
+}
+
+function fetchCentralDB() {
+  fetch("/api/load-db")
+    .then(res => res.json())
+    .then(data => {
+      inMemoryDB = data || {};
+      localStorage.setItem("devx_invoice_db", JSON.stringify(inMemoryDB));
+      updateSyncBadge("connected", `🟢 Central Sync: ${Object.keys(inMemoryDB).length} DB Records`);
+      updateDBBadgeCount();
+      if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display === "flex") renderInvoiceDBList();
+    })
+    .catch(e => console.warn("Fetch Central DB error:", e));
+}
+
+function updateSyncBadge(statusClass, text) {
+  const badge = document.getElementById("centralSyncBadge");
+  if (badge) {
+    badge.className = `sync-status-badge status-${statusClass}`;
+    badge.textContent = text;
+  }
+}
 
 function setupEventListeners() {
   // Accordion Toggles
@@ -147,6 +266,19 @@ function setupEventListeners() {
       item.classList.toggle("collapsed");
     }
   };
+
+  // Document Type Change Handler
+  const docTypeEl = document.getElementById("docType");
+  if (docTypeEl) {
+    docTypeEl.addEventListener("change", (e) => {
+      const val = e.target.value;
+      const cnGroup = document.getElementById("cnRefGroup");
+      if (cnGroup) {
+        cnGroup.style.display = (val === "CREDIT_NOTE" || val === "DEBIT_NOTE") ? "grid" : "none";
+      }
+      updateLivePreview();
+    });
+  }
 
   // Header Actions
   document.getElementById("companyProfileSelect").addEventListener("change", handleProfileChange);
@@ -166,7 +298,7 @@ function setupEventListeners() {
   document.getElementById("btnExportCurrentTallyXML").addEventListener("click", exportCurrentInvoiceTallyXML);
 
   // Master Sheet Filter Controls
-  const filterInputs = ["dbSearchInput", "filterDateFrom", "filterDateTo", "filterCompany", "filterIRNStatus"];
+  const filterInputs = ["dbSearchInput", "filterDateFrom", "filterDateTo", "filterCompany", "filterIRNStatus", "filterDocType"];
   filterInputs.forEach(id => {
     const el = document.getElementById(id);
     if (el) el.addEventListener("change", () => renderInvoiceDBList());
@@ -181,6 +313,7 @@ function setupEventListeners() {
       document.getElementById("filterDateTo").value = "";
       document.getElementById("filterCompany").value = "ALL";
       document.getElementById("filterIRNStatus").value = "ALL";
+      if (document.getElementById("filterDocType")) document.getElementById("filterDocType").value = "ALL";
       renderInvoiceDBList();
     });
   }
@@ -303,9 +436,9 @@ function setupEventListeners() {
   // Attach live input sync to all form control inputs
   const textInputIds = [
     "compName", "compAddress", "compCIN", "compState", "compGSTIN", "compPAN", "compWebsite", "compPhone", "compLogoUrl",
-    "invNo", "invDate", "salesPerson", "principal", "irnNumber", "ackNo", "ackDate", "qrCodePayload",
+    "docType", "cnOriginalInvNo", "cnOriginalInvDate", "invNo", "invDate", "salesPerson", "principal", "irnNumber", "ackNo", "ackDate", "qrCodePayload",
     "billToName", "billToAddress", "billToState", "billToGSTIN", "billToPAN", "bookingParty", "shipperName", "shipperRef",
-    "vessel", "voyageNo", "blNo", "dateOfSupply", "placeOfSupply", "dateOfSailing",
+    "vessel", "voyageNo", "blNo", "dateOfSupply", "placeOfSupply", "dateOfSailing", "portCode", "icdLocation", "shippingBillNo", "shippingBillDate",
     "pol", "pod", "placeOfDelivery", "placeOfReceipt", "invoiceType", "remarks", "noOfContainers", "containerNos",
     "beneficiaryName", "bankNameAddress", "bankAccNo", "accountType", "micrCode", "rtgsIfsc", "neftIfsc", "preparedBy"
   ];
@@ -314,18 +447,35 @@ function setupEventListeners() {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener("input", updateLivePreview);
+      el.addEventListener("change", updateLivePreview);
     }
   });
 }
 
 // --- POPULATE INVOICE DATA ---
 function loadInvoiceData(data) {
+  // Infer docType if not explicitly set
+  if (!data.docType) {
+    if (data.isCreditNote) {
+      data.docType = "CREDIT_NOTE";
+    } else {
+      data.docType = "INVOICE";
+    }
+  }
+
   for (const [key, value] of Object.entries(data)) {
     if (key === "items") continue;
     const el = document.getElementById(key);
     if (el) {
       el.value = value || "";
     }
+  }
+
+  // Handle docType & cnRefGroup visibility
+  const docTypeVal = document.getElementById("docType") ? document.getElementById("docType").value : "INVOICE";
+  const cnGroup = document.getElementById("cnRefGroup");
+  if (cnGroup) {
+    cnGroup.style.display = (docTypeVal === "CREDIT_NOTE" || docTypeVal === "DEBIT_NOTE") ? "grid" : "none";
   }
 
   // Restore Logo and QR state
@@ -811,17 +961,21 @@ function renderQRCodeFromText(text) {
   document.getElementById("viewTotalInWords").textContent = numberToWordsIndian(grandTotal);
 }
 
-// --- INVOICE LOCAL DATABASE STORAGE SYSTEM ---
+// --- INVOICE CENTRAL DATABASE STORAGE SYSTEM ---
 
 function getInvoiceDB() {
+  if (inMemoryDB && Object.keys(inMemoryDB).length > 0) {
+    return inMemoryDB;
+  }
   const data = localStorage.getItem("devx_invoice_db");
-  return data ? JSON.parse(data) : {};
+  inMemoryDB = data ? JSON.parse(data) : {};
+  return inMemoryDB;
 }
 
 function saveInvoiceToDB() {
   const invNo = document.getElementById("invNo").value.trim();
   if (!invNo) {
-    alert("Please enter an Invoice No before saving to Database!");
+    alert("Please enter an Invoice / Document No before saving to Database!");
     document.getElementById("invNo").focus();
     return;
   }
@@ -842,7 +996,15 @@ function saveInvoiceToDB() {
     });
   });
 
+  const docTypeVal = document.getElementById("docType") ? document.getElementById("docType").value : "INVOICE";
+  const isCN = docTypeVal === "CREDIT_NOTE";
+
   const invoiceRecord = {
+    docType: docTypeVal,
+    isCreditNote: isCN,
+    cnOriginalInvNo: document.getElementById("cnOriginalInvNo") ? document.getElementById("cnOriginalInvNo").value : "",
+    cnOriginalInvDate: document.getElementById("cnOriginalInvDate") ? document.getElementById("cnOriginalInvDate").value : "",
+
     invNo: invNo,
     invDate: document.getElementById("invDate").value,
     salesPerson: document.getElementById("salesPerson").value,
@@ -852,7 +1014,7 @@ function saveInvoiceToDB() {
     ackDate: document.getElementById("ackDate") ? document.getElementById("ackDate").value : "",
     qrCodePayload: document.getElementById("qrCodePayload") ? document.getElementById("qrCodePayload").value : "",
     qrCodeDataUrl: currentQRDataUrl,
-    
+
     compName: document.getElementById("compName").value,
     compLogoUrl: document.getElementById("compLogoUrl").value,
     compAddress: document.getElementById("compAddress").value,
@@ -882,6 +1044,12 @@ function saveInvoiceToDB() {
     pod: document.getElementById("pod").value,
     placeOfDelivery: document.getElementById("placeOfDelivery").value,
     placeOfReceipt: document.getElementById("placeOfReceipt").value,
+
+    portCode: document.getElementById("portCode") ? document.getElementById("portCode").value : "",
+    icdLocation: document.getElementById("icdLocation") ? document.getElementById("icdLocation").value : "",
+    shippingBillNo: document.getElementById("shippingBillNo") ? document.getElementById("shippingBillNo").value : "",
+    shippingBillDate: document.getElementById("shippingBillDate") ? document.getElementById("shippingBillDate").value : "",
+
     invoiceType: document.getElementById("invoiceType").value,
     remarks: document.getElementById("remarks").value,
     noOfContainers: document.getElementById("noOfContainers").value,
@@ -901,12 +1069,40 @@ function saveInvoiceToDB() {
     savedAt: new Date().toLocaleString()
   };
 
-  const db = getInvoiceDB();
-  db[invNo] = invoiceRecord;
-  localStorage.setItem("devx_invoice_db", JSON.stringify(db));
+  // 1. Save in-memory & LocalStorage cache
+  inMemoryDB[invNo] = invoiceRecord;
+  localStorage.setItem("devx_invoice_db", JSON.stringify(inMemoryDB));
+
+  // 2. Save via Central REST API
+  fetch("/api/save-invoice", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ invNo, invoiceData: invoiceRecord })
+  })
+  .then(res => res.json())
+  .then(resData => {
+    console.log("💾 Central Server save response:", resData);
+    updateSyncBadge("connected", `🟢 Central Sync: ${Object.keys(inMemoryDB).length} DB Records`);
+  })
+  .catch(err => {
+    console.warn("⚠️ Central REST save error:", err.message);
+  });
+
+  // 3. Broadcast over WebSocket
+  if (centralWebSocket && centralWebSocket.readyState === WebSocket.OPEN) {
+    try {
+      centralWebSocket.send(JSON.stringify({
+        type: 'SAVE_INVOICE',
+        payload: { invNo, invoiceData: invoiceRecord }
+      }));
+    } catch (e) {
+      console.warn("WS send error:", e);
+    }
+  }
 
   updateDBBadgeCount();
-  alert(`✅ Invoice "${invNo}" saved successfully in Database!`);
+  const docLabel = isCN ? "Credit Note" : "Invoice";
+  alert(`✅ ${docLabel} "${invNo}" saved successfully in Central Database!`);
 }
 
 function updateDBBadgeCount() {
@@ -1024,6 +1220,13 @@ function getFilteredMasterInvoices() {
       }
     }
 
+    // 5. Document Type Filter
+    const docTypeFilter = document.getElementById("filterDocType") ? document.getElementById("filterDocType").value : "ALL";
+    if (docTypeFilter !== "ALL") {
+      const invDocType = inv.docType || (inv.isCreditNote ? "CREDIT_NOTE" : "INVOICE");
+      if (invDocType !== docTypeFilter) return false;
+    }
+
     return true;
   });
 }
@@ -1080,20 +1283,28 @@ function renderInvoiceDBList() {
   if (document.getElementById("bulkPendingCount")) document.getElementById("bulkPendingCount").textContent = pendingAllCount;
 
   if (filteredInvoices.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="12" style="text-align: center; color: var(--text-muted); padding: 2.5rem;">No matching invoices found in database. Click "💾 Save Invoice" to add invoices.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="12" style="text-align: center; color: var(--text-muted); padding: 2.5rem;">No matching invoices/credit notes found in database. Click "💾 Save Invoice" to add records.</td></tr>`;
     return;
   }
 
   filteredInvoices.forEach(inv => {
     const totals = calculateInvoiceTotals(inv);
     const hasIRN = inv.irnNumber && inv.irnNumber.trim().length > 10;
+    const isCN = inv.docType === 'CREDIT_NOTE' || inv.isCreditNote === true;
+    const isDN = inv.docType === 'DEBIT_NOTE';
+    const docBadge = isCN ? `<span class="status-badge status-credit-note">🔴 CREDIT NOTE</span>` :
+                     (isDN ? `<span class="status-badge status-credit-note">🟡 DEBIT NOTE</span>` :
+                     `<span class="status-badge status-invoice">📄 INVOICE</span>`);
 
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td style="text-align: center;">
         <input type="checkbox" class="chk-master-item" data-id="${escapeHtml(inv.invNo)}">
       </td>
-      <td><strong>${escapeHtml(inv.invNo)}</strong></td>
+      <td>
+        <strong>${escapeHtml(inv.invNo)}</strong>
+        <div style="margin-top: 0.15rem;">${docBadge}</div>
+      </td>
       <td>${escapeHtml(inv.invDate || '-')}</td>
       <td>${escapeHtml(inv.compName || '-')}</td>
       <td>${escapeHtml(inv.billToName || '-')}</td>
@@ -1118,7 +1329,7 @@ function renderInvoiceDBList() {
     tr.querySelector(".btn-load-inv").addEventListener("click", () => {
       loadInvoiceData(inv);
       closeDBModal();
-      alert(`Loaded Invoice "${inv.invNo}" for editing.`);
+      alert(`Loaded "${inv.invNo}" for editing.`);
     });
 
     tr.querySelector(".btn-einv-inv").addEventListener("click", () => {
@@ -1131,7 +1342,7 @@ function renderInvoiceDBList() {
     });
 
     tr.querySelector(".btn-del-inv").addEventListener("click", () => {
-      if (confirm(`Are you sure you want to delete Invoice "${inv.invNo}" from database?`)) {
+      if (confirm(`Are you sure you want to delete "${inv.invNo}" from central database?`)) {
         deleteInvoiceFromDB(inv.invNo);
       }
     });
@@ -1155,7 +1366,25 @@ function getSelectedOrFilteredInvoices() {
 function deleteInvoiceFromDB(invNo) {
   const db = getInvoiceDB();
   delete db[invNo];
+  delete inMemoryDB[invNo];
   localStorage.setItem("devx_invoice_db", JSON.stringify(db));
+
+  fetch(`/api/invoice/${encodeURIComponent(invNo)}`, { method: "DELETE" })
+    .then(res => res.json())
+    .then(data => console.log("🗑️ Central REST Delete response:", data))
+    .catch(err => console.warn("Central REST delete error:", err));
+
+  if (centralWebSocket && centralWebSocket.readyState === WebSocket.OPEN) {
+    try {
+      centralWebSocket.send(JSON.stringify({
+        type: 'DELETE_INVOICE',
+        payload: { invNo }
+      }));
+    } catch (e) {
+      console.warn("WS delete send error:", e);
+    }
+  }
+
   updateDBBadgeCount();
   renderInvoiceDBList();
 }
@@ -1681,7 +1910,14 @@ function exportCurrentInvoiceTallyXML() {
   let invRecord = db[currentInvNo];
 
   if (!invRecord) {
+    const docTypeVal = document.getElementById("docType") ? document.getElementById("docType").value : "INVOICE";
+    const isCN = docTypeVal === "CREDIT_NOTE";
+
     invRecord = {
+      docType: docTypeVal,
+      isCreditNote: isCN,
+      cnOriginalInvNo: document.getElementById("cnOriginalInvNo") ? document.getElementById("cnOriginalInvNo").value : "",
+      cnOriginalInvDate: document.getElementById("cnOriginalInvDate") ? document.getElementById("cnOriginalInvDate").value : "",
       invNo: currentInvNo,
       invDate: document.getElementById("invDate").value,
       compName: document.getElementById("compName").value,
@@ -1693,6 +1929,16 @@ function exportCurrentInvoiceTallyXML() {
       vessel: document.getElementById("vessel").value,
       voyageNo: document.getElementById("voyageNo").value,
       blNo: document.getElementById("blNo").value,
+      pol: document.getElementById("pol").value,
+      pod: document.getElementById("pod").value,
+      placeOfDelivery: document.getElementById("placeOfDelivery").value,
+      placeOfReceipt: document.getElementById("placeOfReceipt").value,
+      portCode: document.getElementById("portCode") ? document.getElementById("portCode").value : "",
+      icdLocation: document.getElementById("icdLocation") ? document.getElementById("icdLocation").value : "",
+      shippingBillNo: document.getElementById("shippingBillNo") ? document.getElementById("shippingBillNo").value : "",
+      shippingBillDate: document.getElementById("shippingBillDate") ? document.getElementById("shippingBillDate").value : "",
+      dateOfSupply: document.getElementById("dateOfSupply").value,
+      containerNos: document.getElementById("containerNos").value,
       items: Array.from(document.querySelectorAll(".item-card")).map(card => ({
         description: card.querySelector(".item-desc").value || "",
         sacHsn: card.querySelector(".item-hsn").value || "",
@@ -1745,42 +1991,147 @@ function exportInvoicesToTallyXML(invoices) {
   xml += `      <REQUESTDATA>\n`;
 
   invoices.forEach(inv => {
+    const isCN = inv.docType === 'CREDIT_NOTE' || inv.isCreditNote === true;
+    const isDN = inv.docType === 'DEBIT_NOTE';
+    const vchTypeName = isCN ? "Credit Note" : (isDN ? "Debit Note" : "Sales");
+
     const totals = calculateInvoiceTotals(inv);
     const tallyDate = formatTallyDate(inv.invDate);
     const partyName = inv.billToName || "SUNDRY DEBTOR PARTY";
-    const narration = `Vessel: ${inv.vessel || ''} | Voyage: ${inv.voyageNo || ''} | BL: ${inv.blNo || ''} | POL: ${inv.pol || ''} | POD: ${inv.pod || ''}`;
+
+    const narrationParts = [];
+    if (inv.vessel) narrationParts.push(`Vessel: ${inv.vessel}`);
+    if (inv.voyageNo) narrationParts.push(`Voyage: ${inv.voyageNo}`);
+    if (inv.blNo) narrationParts.push(`B/L: ${inv.blNo}`);
+    if (inv.portCode || inv.pol) narrationParts.push(`Port: ${inv.portCode || inv.pol}`);
+    if (inv.icdLocation) narrationParts.push(`ICD: ${inv.icdLocation}`);
+    if (inv.shippingBillNo) narrationParts.push(`S/B No: ${inv.shippingBillNo} Dt: ${inv.shippingBillDate || ''}`);
+    if (inv.containerNos) narrationParts.push(`Containers: ${inv.containerNos}`);
+    if (isCN && inv.cnOriginalInvNo) narrationParts.push(`Ref Inv: ${inv.cnOriginalInvNo} Dt: ${inv.cnOriginalInvDate || ''}`);
+    const narration = narrationParts.join(" | ");
+
+    const sbDateFormatted = formatTallyDate(inv.shippingBillDate || inv.dateOfSupply || inv.invDate);
+    const blDateFormatted = formatTallyDate(inv.dateOfSupply || inv.invDate);
+    const portCodeVal = inv.portCode || inv.pol || '';
+    const icdVal = inv.icdLocation || inv.placeOfReceipt || '';
+    const sbNoVal = inv.shippingBillNo || inv.blNo || '';
 
     xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
-    xml += `          <VOUCHER VCHTYPE="Sales" ACTION="Create" OBJVIEW="Accounting Voucher View">\n`;
+    xml += `          <VOUCHER VCHTYPE="${vchTypeName}" ACTION="Create" OBJVIEW="Accounting Voucher View">\n`;
     xml += `            <DATE>${tallyDate}</DATE>\n`;
-    xml += `            <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>\n`;
+    xml += `            <VOUCHERTYPENAME>${vchTypeName}</VOUCHERTYPENAME>\n`;
     xml += `            <VOUCHERNUMBER>${escapeXml(inv.invNo)}</VOUCHERNUMBER>\n`;
     xml += `            <REFERENCE>${escapeXml(inv.invNo)}</REFERENCE>\n`;
     xml += `            <PARTYLEDGERNAME>${escapeXml(partyName)}</PARTYLEDGERNAME>\n`;
     xml += `            <PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>\n`;
     xml += `            <NARRATION>${escapeXml(narration)}</NARRATION>\n`;
 
-    // 1. Party Ledger Debit Entry (-GrandTotal)
+    // Credit Note reference details
+    if (isCN) {
+      xml += `            <ORIGINALINVOICENO>${escapeXml(inv.cnOriginalInvNo || '')}</ORIGINALINVOICENO>\n`;
+      xml += `            <ORIGINALINVOICEDATE>${formatTallyDate(inv.cnOriginalInvDate || inv.invDate)}</ORIGINALINVOICEDATE>\n`;
+    }
+
+    // Tally Voucher Header Shipment & Export Statutory Details
+    if (portCodeVal) xml += `            <PORTCODE>${escapeXml(portCodeVal)}</PORTCODE>\n`;
+    if (inv.pol) xml += `            <PORTNAME>${escapeXml(inv.pol)}</PORTNAME>\n`;
+    if (sbNoVal) xml += `            <SHIPPINGBILLNO>${escapeXml(sbNoVal)}</SHIPPINGBILLNO>\n`;
+    if (sbDateFormatted) xml += `            <SHIPPINGBILLDATE>${sbDateFormatted}</SHIPPINGBILLDATE>\n`;
+    if (inv.blNo) xml += `            <BILLOFLADINGNO>${escapeXml(inv.blNo)}</BILLOFLADINGNO>\n`;
+    if (blDateFormatted) xml += `            <BILLOFLADINGDATE>${blDateFormatted}</BILLOFLADINGDATE>\n`;
+    if (icdVal) xml += `            <ICDNAME>${escapeXml(icdVal)}</ICDNAME>\n`;
+    if (inv.pol || inv.placeOfReceipt) xml += `            <DISPATCHFROMNAME>${escapeXml(inv.pol || inv.placeOfReceipt)}</DISPATCHFROMNAME>\n`;
+    if (inv.pod || inv.placeOfDelivery) xml += `            <DISPATCHTO>${escapeXml(inv.pod || inv.placeOfDelivery)}</DISPATCHTO>\n`;
+    if (inv.placeOfDelivery || inv.pod) xml += `            <DESTINATION>${escapeXml(inv.placeOfDelivery || inv.pod)}</DESTINATION>\n`;
+    if (inv.vessel) xml += `            <VESSELFLIGHTNO>${escapeXml(((inv.vessel || '') + ' ' + (inv.voyageNo || '')).trim())}</VESSELFLIGHTNO>\n`;
+    if (inv.billToAddress) {
+      xml += `            <BASICBUYERADDRESS.LIST>\n`;
+      xml += `              <BASICBUYERADDRESS>${escapeXml(inv.billToAddress)}</BASICBUYERADDRESS>\n`;
+      xml += `            </BASICBUYERADDRESS.LIST>\n`;
+    }
+    if (inv.placeOfDelivery || inv.pod) xml += `            <BASICFINALDESTINATION>${escapeXml(inv.placeOfDelivery || inv.pod)}</BASICFINALDESTINATION>\n`;
+    xml += `            <BASICORDERTERMS>${escapeXml(narration)}</BASICORDERTERMS>\n`;
+    if (portCodeVal) xml += `            <BASICPORTCODE>${escapeXml(portCodeVal)}</BASICPORTCODE>\n`;
+    if (sbNoVal) xml += `            <BASICSHIPPINGBILLNO>${escapeXml(sbNoVal)}</BASICSHIPPINGBILLNO>\n`;
+    if (sbDateFormatted) xml += `            <BASICSHIPPINGBILLDATE>${sbDateFormatted}</BASICSHIPPINGBILLDATE>\n`;
+
+    // Statutory export list block
+    xml += `            <STATUTORYDETAILS.LIST>\n`;
+    xml += `              <STATUTORYDETAILS>\n`;
+    if (portCodeVal) xml += `                <PORTCODE>${escapeXml(portCodeVal)}</PORTCODE>\n`;
+    if (sbNoVal) xml += `                <SHIPPINGBILLNO>${escapeXml(sbNoVal)}</SHIPPINGBILLNO>\n`;
+    if (sbDateFormatted) xml += `                <SHIPPINGBILLDATE>${sbDateFormatted}</SHIPPINGBILLDATE>\n`;
+    xml += `              </STATUTORYDETAILS>\n`;
+    xml += `            </STATUTORYDETAILS.LIST>\n`;
+
+    // --- LEDGER ENTRIES LIST ---
+
+    // 1. Party Ledger Entry
+    // For Sales Invoice: Party is Debited (ISDEEMEDPOSITIVE = Yes, Amount = -GrandTotal)
+    // For Credit Note: Party is Credited (ISDEEMEDPOSITIVE = No, Amount = +GrandTotal)
     xml += `            <ALLLEDGERENTRIES.LIST>\n`;
     xml += `              <LEDGERNAME>${escapeXml(partyName)}</LEDGERNAME>\n`;
-    xml += `              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
-    xml += `              <AMOUNT>-${totals.grand.toFixed(2)}</AMOUNT>\n`;
+    xml += `              <ISDEEMEDPOSITIVE>${isCN ? "No" : "Yes"}</ISDEEMEDPOSITIVE>\n`;
+    xml += `              <AMOUNT>${isCN ? totals.grand.toFixed(2) : `-${totals.grand.toFixed(2)}`}</AMOUNT>\n`;
     xml += `            </ALLLEDGERENTRIES.LIST>\n`;
 
-    // 2. Sales Income Credit Entry (+Taxable)
-    xml += `            <ALLLEDGERENTRIES.LIST>\n`;
-    xml += `              <LEDGERNAME>Freight &amp; Shipping Charges Income</LEDGERNAME>\n`;
-    xml += `              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>\n`;
-    xml += `              <AMOUNT>${totals.taxable.toFixed(2)}</AMOUNT>\n`;
-    xml += `            </ALLLEDGERENTRIES.LIST>\n`;
+    // 2. Individual Line Item Charge Ledgers (EXACT Service Name entered by user)
+    if (inv.items && Array.isArray(inv.items) && inv.items.length > 0) {
+      inv.items.forEach(item => {
+        const itemQty = parseFloat(item.qty) || 0;
+        const itemRate = parseFloat(item.rate) || 0;
+        const itemExRate = inv.isCommercial ? 1 : ((parseFloat(item.exRate) || 1) > 0 ? parseFloat(item.exRate) : 1);
+        const itemTaxable = itemQty * itemRate * itemExRate;
+        const serviceLedgerName = (item.description || "Freight & Shipping Charges").trim();
+
+        xml += `            <ALLLEDGERENTRIES.LIST>\n`;
+        xml += `              <LEDGERNAME>${escapeXml(serviceLedgerName)}</LEDGERNAME>\n`;
+        xml += `              <ISDEEMEDPOSITIVE>${isCN ? "Yes" : "No"}</ISDEEMEDPOSITIVE>\n`;
+        xml += `              <AMOUNT>${isCN ? `-${itemTaxable.toFixed(2)}` : itemTaxable.toFixed(2)}</AMOUNT>\n`;
+        xml += `            </ALLLEDGERENTRIES.LIST>\n`;
+      });
+    } else {
+      // Fallback if items array missing
+      xml += `            <ALLLEDGERENTRIES.LIST>\n`;
+      xml += `              <LEDGERNAME>Freight &amp; Shipping Charges Income</LEDGERNAME>\n`;
+      xml += `              <ISDEEMEDPOSITIVE>${isCN ? "Yes" : "No"}</ISDEEMEDPOSITIVE>\n`;
+      xml += `              <AMOUNT>${isCN ? `-${totals.taxable.toFixed(2)}` : totals.taxable.toFixed(2)}</AMOUNT>\n`;
+      xml += `            </ALLLEDGERENTRIES.LIST>\n`;
+    }
 
     // 3. Tax Ledgers (Output IGST)
     if (totals.igst > 0) {
       xml += `            <ALLLEDGERENTRIES.LIST>\n`;
       xml += `              <LEDGERNAME>Output IGST 18%</LEDGERNAME>\n`;
-      xml += `              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>\n`;
-      xml += `              <AMOUNT>${totals.igst.toFixed(2)}</AMOUNT>\n`;
+      xml += `              <ISDEEMEDPOSITIVE>${isCN ? "Yes" : "No"}</ISDEEMEDPOSITIVE>\n`;
+      xml += `              <AMOUNT>${isCN ? `-${totals.igst.toFixed(2)}` : totals.igst.toFixed(2)}</AMOUNT>\n`;
       xml += `            </ALLLEDGERENTRIES.LIST>\n`;
+    }
+
+    // 4. Custom Tally UDF Fields for Maximum Compatibility
+    if (portCodeVal) {
+      xml += `            <UDF:PORTCODE.LIST DESC="Port Code" ISPAYMENT="No" TYPE="String"><UDF:PORTCODE>${escapeXml(portCodeVal)}</UDF:PORTCODE></UDF:PORTCODE.LIST>\n`;
+    }
+    if (sbNoVal) {
+      xml += `            <UDF:SHIPPINGBILLNO.LIST DESC="Shipping Bill No" ISPAYMENT="No" TYPE="String"><UDF:SHIPPINGBILLNO>${escapeXml(sbNoVal)}</UDF:SHIPPINGBILLNO></UDF:SHIPPINGBILLNO.LIST>\n`;
+    }
+    if (sbDateFormatted) {
+      xml += `            <UDF:SHIPPINGBILLDATE.LIST DESC="Shipping Bill Date" ISPAYMENT="No" TYPE="String"><UDF:SHIPPINGBILLDATE>${sbDateFormatted}</UDF:SHIPPINGBILLDATE></UDF:SHIPPINGBILLDATE.LIST>\n`;
+    }
+    if (icdVal) {
+      xml += `            <UDF:ICDLOCATION.LIST DESC="ICD Location" ISPAYMENT="No" TYPE="String"><UDF:ICDLOCATION>${escapeXml(icdVal)}</UDF:ICDLOCATION></UDF:ICDLOCATION.LIST>\n`;
+    }
+    if (inv.vessel) {
+      xml += `            <UDF:VESSELNAME.LIST DESC="Vessel Name" ISPAYMENT="No" TYPE="String"><UDF:VESSELNAME>${escapeXml(inv.vessel)}</UDF:VESSELNAME></UDF:VESSELNAME.LIST>\n`;
+    }
+    if (inv.voyageNo) {
+      xml += `            <UDF:VOYAGENO.LIST DESC="Voyage No" ISPAYMENT="No" TYPE="String"><UDF:VOYAGENO>${escapeXml(inv.voyageNo)}</UDF:VOYAGENO></UDF:VOYAGENO.LIST>\n`;
+    }
+    if (inv.blNo) {
+      xml += `            <UDF:BLNO.LIST DESC="B/L No" ISPAYMENT="No" TYPE="String"><UDF:BLNO>${escapeXml(inv.blNo)}</UDF:BLNO></UDF:BLNO.LIST>\n`;
+    }
+    if (inv.containerNos) {
+      xml += `            <UDF:CONTAINERNOS.LIST DESC="Container Nos" ISPAYMENT="No" TYPE="String"><UDF:CONTAINERNOS>${escapeXml(inv.containerNos)}</UDF:CONTAINERNOS></UDF:CONTAINERNOS.LIST>\n`;
     }
 
     xml += `          </VOUCHER>\n`;
@@ -1796,13 +2147,13 @@ function exportInvoicesToTallyXML(invoices) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `Tally_Prime_Sales_Import_${Date.now()}.xml`;
+  a.download = `Tally_Prime_Import_${Date.now()}.xml`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 
-  alert(`🟢 Generated Tally Prime XML for ${invoices.length} invoice(s)!\nImport this file in Tally Prime -> Import -> Vouchers.`);
+  alert(`🟢 Generated Tally Prime XML for ${invoices.length} document(s)!\nLine item ledger names, Credit Notes, Port, ICD, and Shipping Bill details included.\nImport this file in Tally Prime -> Import -> Vouchers.`);
 }
 
 function escapeXml(str) {
