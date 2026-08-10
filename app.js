@@ -210,9 +210,41 @@ function syncGitHubDatabase(showAlert = false) {
     });
 }
 
+function getDeletedInvoicesRegistry() {
+  try {
+    const list = localStorage.getItem("devx_deleted_invoices");
+    return list ? JSON.parse(list) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function registerDeletedInvoice(invNo) {
+  const deletedList = getDeletedInvoicesRegistry();
+  if (!deletedList.includes(invNo)) {
+    deletedList.push(invNo);
+    localStorage.setItem("devx_deleted_invoices", JSON.stringify(deletedList));
+  }
+}
+
+function unregisterDeletedInvoice(invNo) {
+  let deletedList = getDeletedInvoicesRegistry();
+  if (deletedList.includes(invNo)) {
+    deletedList = deletedList.filter(id => id !== invNo);
+    localStorage.setItem("devx_deleted_invoices", JSON.stringify(deletedList));
+  }
+}
+
 function mergeDatabaseRecords(remoteData, sourceName, showAlert = false) {
+  const deletedList = getDeletedInvoicesRegistry();
   let addedCount = 0;
+
   for (const [invNo, record] of Object.entries(remoteData)) {
+    // If user explicitly deleted this invoice locally, do not force-re-add it
+    if (deletedList.includes(invNo)) {
+      continue;
+    }
+
     if (!inMemoryDB[invNo]) {
       inMemoryDB[invNo] = record;
       addedCount++;
@@ -1120,6 +1152,7 @@ function saveInvoiceToDB() {
   };
 
   // 1. Save in-memory & LocalStorage cache
+  unregisterDeletedInvoice(invNo);
   inMemoryDB[invNo] = invoiceRecord;
   localStorage.setItem("devx_invoice_db", JSON.stringify(inMemoryDB));
 
@@ -1418,6 +1451,7 @@ function deleteInvoiceFromDB(invNo) {
   delete db[invNo];
   delete inMemoryDB[invNo];
   localStorage.setItem("devx_invoice_db", JSON.stringify(db));
+  registerDeletedInvoice(invNo);
 
   fetch(`/api/invoice/${encodeURIComponent(invNo)}`, { method: "DELETE" })
     .then(res => res.json())
@@ -1449,7 +1483,11 @@ function deleteSelectedMasterInvoices() {
   if (confirm(`Are you sure you want to delete ${selectedCbs.length} selected invoice(s) permanently?`)) {
     const db = getInvoiceDB();
     selectedCbs.forEach(cb => {
-      delete db[cb.dataset.id];
+      const invNo = cb.dataset.id;
+      delete db[invNo];
+      delete inMemoryDB[invNo];
+      registerDeletedInvoice(invNo);
+      fetch(`/api/invoice/${encodeURIComponent(invNo)}`, { method: "DELETE" }).catch(() => {});
     });
     localStorage.setItem("devx_invoice_db", JSON.stringify(db));
     updateDBBadgeCount();
@@ -1508,7 +1546,7 @@ function handleBulkEInvoice() {
   }
 }
 
-function exportDatabaseJSON() {
+function exportDatabaseJSON(asRepoFile = false) {
   const db = getInvoiceDB();
   const count = Object.keys(db).length;
 
@@ -1521,16 +1559,16 @@ function exportDatabaseJSON() {
   const blob = new Blob([jsonStr], { type: "application/json;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
 
-  const dateStamp = new Date().toISOString().slice(0, 10);
+  const filename = asRepoFile ? "invoices_database.json" : "invoices_database.json";
   const a = document.createElement("a");
   a.href = url;
-  a.download = `devx_maritime_invoices_db_backup_${dateStamp}.json`;
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 
-  alert(`💾 Database Backup exported successfully!\n\nContains ${count} saved invoice records.\nYou can save this file into your project folder or back it up anywhere on your computer.`);
+  alert(`💾 Exported "${filename}" containing all ${count} invoice records!\n\nSave this file as "invoices_database.json" in your repository root to make all ${count} invoices available across all systems on GitHub!`);
 }
 
 function handleImportDatabaseJSON(e) {
@@ -1550,8 +1588,11 @@ function handleImportDatabaseJSON(e) {
       let importedCount = 0;
 
       for (const [invNo, record] of Object.entries(importedData)) {
-        if (record && record.invNo) {
-          existingDB[invNo] = record;
+        if (record && (record.invNo || invNo)) {
+          const key = record.invNo || invNo;
+          existingDB[key] = record;
+          inMemoryDB[key] = record;
+          unregisterDeletedInvoice(key);
           importedCount++;
         }
       }
@@ -1559,7 +1600,7 @@ function handleImportDatabaseJSON(e) {
       localStorage.setItem("devx_invoice_db", JSON.stringify(existingDB));
       updateDBBadgeCount();
       renderInvoiceDBList();
-      alert(`📂 Successfully imported ${importedCount} invoice(s) into your Master Database!`);
+      alert(`📂 Successfully imported ${importedCount} invoice(s) into your Master Database!\nTotal Database Records: ${Object.keys(existingDB).length}`);
     } catch (err) {
       alert("Error reading JSON database file: " + err.message);
     }
