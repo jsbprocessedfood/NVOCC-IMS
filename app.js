@@ -142,36 +142,100 @@ document.addEventListener("DOMContentLoaded", () => {
   initCentralDBSync();
 });
 
-function initCentralDBSync() {
+const GITHUB_DB_RAW_URL = "https://raw.githubusercontent.com/jsbprocessedfood/NVOCC-IMS/TEST-Branch/invoices_database.json";
+
+function initCentralDBSync(forceAlert = false) {
   updateSyncBadge("syncing", "🌐 Connecting Central DB...");
 
-  // 1. Fetch Central DB over REST API
+  // Load existing local cache from LocalStorage
+  const cached = localStorage.getItem("devx_invoice_db");
+  if (cached) {
+    try {
+      inMemoryDB = JSON.parse(cached);
+    } catch (e) {}
+  }
+
+  // Priority 1: Try Local Server API (/api/load-db)
   fetch("/api/load-db")
     .then(res => {
-      if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
     })
     .then(data => {
       if (data && typeof data === 'object') {
-        inMemoryDB = data;
-        localStorage.setItem("devx_invoice_db", JSON.stringify(inMemoryDB));
-        isCentralSyncActive = true;
-        updateSyncBadge("connected", `🟢 Central Sync: ${Object.keys(inMemoryDB).length} DB Records`);
-        updateDBBadgeCount();
-        if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display === "flex") {
-          renderInvoiceDBList();
-        }
+        mergeDatabaseRecords(data, "Local Server", forceAlert);
+      }
+    })
+    .catch(() => {
+      // Priority 2: Try Relative Static JSON File (./invoices_database.json)
+      fetch("./invoices_database.json?t=" + Date.now())
+        .then(res => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then(data => {
+          if (data && typeof data === 'object') {
+            mergeDatabaseRecords(data, "Local File", forceAlert);
+          }
+        })
+        .catch(() => {
+          // Priority 3: Try Central GitHub Raw Repository DB
+          syncGitHubDatabase(forceAlert);
+        });
+    });
+
+  // Connect WebSocket for Real-Time Multi-User Sync if local server is running
+  connectWebSocketSync();
+}
+
+function syncGitHubDatabase(showAlert = false) {
+  updateSyncBadge("syncing", "🌐 Fetching GitHub DB...");
+  fetch(GITHUB_DB_RAW_URL + "?t=" + Date.now())
+    .then(res => {
+      if (!res.ok) throw new Error(`GitHub HTTP ${res.status}`);
+      return res.json();
+    })
+    .then(data => {
+      if (data && typeof data === 'object') {
+        mergeDatabaseRecords(data, "GitHub Central DB", showAlert);
       }
     })
     .catch(err => {
-      console.warn("⚠️ Central REST DB fetch failed, falling back to LocalStorage cache:", err.message);
-      const cached = localStorage.getItem("devx_invoice_db");
-      inMemoryDB = cached ? JSON.parse(cached) : {};
-      updateSyncBadge("offline", `🔴 Central Offline (${Object.keys(inMemoryDB).length} Local)`);
+      console.warn("⚠️ GitHub Raw DB fetch error:", err.message);
+      updateSyncBadge("offline", `🟢 Local DB (${Object.keys(inMemoryDB).length} Invoices)`);
       updateDBBadgeCount();
+      if (showAlert) {
+        alert(`🔴 Unable to fetch GitHub DB. Currently using local database cache (${Object.keys(inMemoryDB).length} invoices).`);
+      }
     });
+}
 
-  // 2. Connect WebSocket for Real-Time Multi-User Sync
+function mergeDatabaseRecords(remoteData, sourceName, showAlert = false) {
+  let addedCount = 0;
+  for (const [invNo, record] of Object.entries(remoteData)) {
+    if (!inMemoryDB[invNo]) {
+      inMemoryDB[invNo] = record;
+      addedCount++;
+    }
+  }
+
+  localStorage.setItem("devx_invoice_db", JSON.stringify(inMemoryDB));
+  isCentralSyncActive = true;
+
+  const totalCount = Object.keys(inMemoryDB).length;
+  updateSyncBadge("connected", `🟢 ${sourceName}: ${totalCount} Invoices`);
+  updateDBBadgeCount();
+
+  if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display === "flex") {
+    renderInvoiceDBList();
+  }
+
+  if (showAlert) {
+    alert(`🟢 Central Sync Complete!\nConnected Source: ${sourceName}\nTotal Invoices & Credit Notes: ${totalCount} (${addedCount} new merged).`);
+  }
+}
+
+function connectWebSocketSync() {
   try {
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsHost = window.location.hostname || 'localhost';
@@ -193,19 +257,13 @@ function initCentralDBSync() {
         const msg = JSON.parse(evt.data);
         if (msg.type === 'FULL_SYNC' || msg.type === 'FULL_SYNC_TRIGGERED') {
           if (msg.payload && typeof msg.payload === 'object') {
-            inMemoryDB = msg.payload;
-            localStorage.setItem("devx_invoice_db", JSON.stringify(inMemoryDB));
-            updateSyncBadge("connected", `🟢 Central Sync: ${Object.keys(inMemoryDB).length} DB Records`);
-            updateDBBadgeCount();
-            if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display === "flex") renderInvoiceDBList();
-          } else {
-            fetchCentralDB();
+            mergeDatabaseRecords(msg.payload, "Live Server");
           }
         } else if (msg.type === 'INVOICE_UPDATED') {
           if (msg.payload && msg.payload.invNo && msg.payload.invoice) {
             inMemoryDB[msg.payload.invNo] = msg.payload.invoice;
             localStorage.setItem("devx_invoice_db", JSON.stringify(inMemoryDB));
-            updateSyncBadge("connected", `🟢 Central Sync: ${Object.keys(inMemoryDB).length} DB Records`);
+            updateSyncBadge("connected", `🟢 Live Sync: ${Object.keys(inMemoryDB).length} Invoices`);
             updateDBBadgeCount();
             if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display === "flex") renderInvoiceDBList();
           }
@@ -213,7 +271,7 @@ function initCentralDBSync() {
           if (msg.payload && msg.payload.invNo) {
             delete inMemoryDB[msg.payload.invNo];
             localStorage.setItem("devx_invoice_db", JSON.stringify(inMemoryDB));
-            updateSyncBadge("connected", `🟢 Central Sync: ${Object.keys(inMemoryDB).length} DB Records`);
+            updateSyncBadge("connected", `🟢 Live Sync: ${Object.keys(inMemoryDB).length} Invoices`);
             updateDBBadgeCount();
             if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display === "flex") renderInvoiceDBList();
           }
@@ -224,13 +282,7 @@ function initCentralDBSync() {
     };
 
     centralWebSocket.onerror = () => {
-      updateSyncBadge("offline", `🔴 Central Offline (Local Mode)`);
-    };
-
-    centralWebSocket.onclose = () => {
-      updateSyncBadge("offline", `🔴 Central Disconnected`);
-      // Retry WebSocket connection after 5 seconds
-      setTimeout(initCentralDBSync, 5000);
+      // Quiet fallback when node server is not running
     };
   } catch (err) {
     console.warn("WebSocket init error:", err.message);
@@ -238,16 +290,7 @@ function initCentralDBSync() {
 }
 
 function fetchCentralDB() {
-  fetch("/api/load-db")
-    .then(res => res.json())
-    .then(data => {
-      inMemoryDB = data || {};
-      localStorage.setItem("devx_invoice_db", JSON.stringify(inMemoryDB));
-      updateSyncBadge("connected", `🟢 Central Sync: ${Object.keys(inMemoryDB).length} DB Records`);
-      updateDBBadgeCount();
-      if (document.getElementById("dbModal") && document.getElementById("dbModal").style.display === "flex") renderInvoiceDBList();
-    })
-    .catch(e => console.warn("Fetch Central DB error:", e));
+  initCentralDBSync(true);
 }
 
 function updateSyncBadge(statusClass, text) {
@@ -266,6 +309,12 @@ function setupEventListeners() {
       item.classList.toggle("collapsed");
     }
   };
+
+  // Header Sync Badge Click -> Manual Resync
+  const badge = document.getElementById("centralSyncBadge");
+  if (badge) {
+    badge.addEventListener("click", () => initCentralDBSync(true));
+  }
 
   // Document Type Change Handler
   const docTypeEl = document.getElementById("docType");
@@ -331,6 +380,7 @@ function setupEventListeners() {
   document.getElementById("btnExportMasterTallyXML").addEventListener("click", exportSelectedOrFilteredTallyXML);
   document.getElementById("btnDeleteSelectedDB").addEventListener("click", deleteSelectedMasterInvoices);
   document.getElementById("btnBulkEInvoice").addEventListener("click", handleBulkEInvoice);
+  if (document.getElementById("btnSyncGitHubDB")) document.getElementById("btnSyncGitHubDB").addEventListener("click", () => syncGitHubDatabase(true));
   document.getElementById("btnExportJsonDB").addEventListener("click", exportDatabaseJSON);
   
   const btnImportJsonDB = document.getElementById("btnImportJsonDB");
