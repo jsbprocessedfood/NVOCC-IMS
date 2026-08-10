@@ -413,7 +413,8 @@ function setupEventListeners() {
   document.getElementById("btnDeleteSelectedDB").addEventListener("click", deleteSelectedMasterInvoices);
   document.getElementById("btnBulkEInvoice").addEventListener("click", handleBulkEInvoice);
   if (document.getElementById("btnSyncGitHubDB")) document.getElementById("btnSyncGitHubDB").addEventListener("click", () => syncGitHubDatabase(true));
-  document.getElementById("btnExportJsonDB").addEventListener("click", exportDatabaseJSON);
+  document.getElementById("btnExportJsonDB").addEventListener("click", () => exportDatabaseJSON(true));
+  if (document.getElementById("btnCopyDbJson")) document.getElementById("btnCopyDbJson").addEventListener("click", copyDatabaseJSONToClipboard);
   
   const btnImportJsonDB = document.getElementById("btnImportJsonDB");
   const fileInputDB = document.getElementById("importJsonFileInput");
@@ -1569,6 +1570,35 @@ function exportDatabaseJSON(asRepoFile = false) {
   URL.revokeObjectURL(url);
 
   alert(`💾 Exported "${filename}" containing all ${count} invoice records!\n\nSave this file as "invoices_database.json" in your repository root to make all ${count} invoices available across all systems on GitHub!`);
+}
+
+function copyDatabaseJSONToClipboard() {
+  const db = getInvoiceDB();
+  const count = Object.keys(db).length;
+
+  if (count === 0) {
+    alert("Database is currently empty!");
+    return;
+  }
+
+  const jsonStr = JSON.stringify(db, null, 2);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(jsonStr)
+      .then(() => alert(`📋 Copied full database JSON with ${count} invoice records to clipboard!`))
+      .catch(() => fallbackCopy(jsonStr, count));
+  } else {
+    fallbackCopy(jsonStr, count);
+  }
+}
+
+function fallbackCopy(text, count) {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
+  alert(`📋 Copied full database JSON with ${count} invoice records to clipboard!`);
 }
 
 function handleImportDatabaseJSON(e) {
