@@ -1011,6 +1011,13 @@ body.view-preview-only .form-panel {
   align-items: center;
   gap: 0.35rem;
   transition: all 0.3s ease;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sync-status-badge:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.15);
 }
 
 .sync-status-badge.status-connected {
