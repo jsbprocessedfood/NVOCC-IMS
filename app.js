@@ -142,59 +142,21 @@ document.addEventListener("DOMContentLoaded", () => {
   initCentralDBSync();
 });
 
-const GITHUB_DB_RAW_URL = "https://raw.githubusercontent.com/jsbprocessedfood/NVOCC-IMS/TEST-Branch/invoices_database.json";
-
-function initCentralDBSync(forceAlert = false) {
-  updateSyncBadge("syncing", "🌐 Connecting Central DB...");
-
-  // Load existing local cache from LocalStorage
-  const cached = localStorage.getItem("devx_invoice_db");
-  if (cached) {
-    try {
-      inMemoryDB = JSON.parse(cached);
-    } catch (e) {}
-  }
-
-  // Priority 1: Try Local Server API (/api/load-db)
-  fetch("/api/load-db")
-    .then(res => {
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
-    })
-    .then(data => {
-      if (data && typeof data === 'object') {
-        mergeDatabaseRecords(data, "Local Server", forceAlert);
-      }
-    })
-    .catch(() => {
-      // Priority 2: Try Relative Static JSON File (./invoices_database.json)
-      fetch("./invoices_database.json?t=" + Date.now())
-        .then(res => {
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          return res.json();
-        })
-        .then(data => {
-          if (data && typeof data === 'object') {
-            mergeDatabaseRecords(data, "Local File", forceAlert);
-          }
-        })
-        .catch(() => {
-          // Priority 3: Try Central GitHub Raw Repository DB
-          syncGitHubDatabase(forceAlert);
-        });
-    });
-
-  // Connect WebSocket for Real-Time Multi-User Sync if local server is running
-  connectWebSocketSync();
-}
+const GITHUB_DB_RAW_URL = "https://raw.githubusercontent.com/jsbprocessedfood/NVOCC-IMS/main/invoices_database.json";
+const GITHUB_DB_TEST_URL = "https://raw.githubusercontent.com/jsbprocessedfood/NVOCC-IMS/TEST-Branch/invoices_database.json";
 
 function syncGitHubDatabase(showAlert = false) {
   updateSyncBadge("syncing", "🌐 Fetching GitHub DB...");
-  fetch(GITHUB_DB_RAW_URL + "?t=" + Date.now())
-    .then(res => {
-      if (!res.ok) throw new Error(`GitHub HTTP ${res.status}`);
+
+  const fetchRepoDB = (url) => {
+    return fetch(url + "?t=" + Date.now()).then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
-    })
+    });
+  };
+
+  fetchRepoDB(GITHUB_DB_RAW_URL)
+    .catch(() => fetchRepoDB(GITHUB_DB_TEST_URL))
     .then(data => {
       if (data && typeof data === 'object') {
         mergeDatabaseRecords(data, "GitHub Central DB", showAlert);
@@ -265,6 +227,50 @@ function mergeDatabaseRecords(remoteData, sourceName, showAlert = false) {
   if (showAlert) {
     alert(`🟢 Central Sync Complete!\nConnected Source: ${sourceName}\nTotal Invoices & Credit Notes: ${totalCount} (${addedCount} new merged).`);
   }
+}
+
+function initCentralDBSync(forceAlert = false) {
+  updateSyncBadge("syncing", "🌐 Connecting Central DB...");
+
+  // Load existing local cache from LocalStorage
+  const cached = localStorage.getItem("devx_invoice_db");
+  if (cached) {
+    try {
+      inMemoryDB = JSON.parse(cached);
+    } catch (e) {}
+  }
+
+  // Priority 1: Try Local Server API (/api/load-db)
+  fetch("/api/load-db")
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then(data => {
+      if (data && typeof data === 'object') {
+        mergeDatabaseRecords(data, "Local Server", forceAlert);
+      }
+    })
+    .catch(() => {
+      // Priority 2: Try Relative Static JSON File (./invoices_database.json)
+      fetch("./invoices_database.json?t=" + Date.now())
+        .then(res => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then(data => {
+          if (data && typeof data === 'object') {
+            mergeDatabaseRecords(data, "Local File", forceAlert);
+          }
+        })
+        .catch(() => {
+          // Priority 3: Try Central GitHub Raw Repository DB
+          syncGitHubDatabase(forceAlert);
+        });
+    });
+
+  // Connect WebSocket for Real-Time Multi-User Sync if local server is running
+  connectWebSocketSync();
 }
 
 function connectWebSocketSync() {
