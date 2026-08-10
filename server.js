@@ -404,6 +404,34 @@ app.post('/api/save-db', (req, res) => {
   }
 });
 
+// Save single invoice or credit note (REST endpoint)
+app.post('/api/save-invoice', (req, res) => {
+  try {
+    const { invNo, invoiceData } = req.body;
+    if (!invNo || !invoiceData) {
+      return res.status(400).json({ error: 'invNo and invoiceData are required' });
+    }
+    invoiceDatabase[invNo] = {
+      ...invoiceData,
+      savedAt: new Date().toISOString()
+    };
+    saveDatabase();
+    res.json({
+      success: true,
+      message: `Invoice ${invNo} saved successfully`,
+      timestamp: new Date().toISOString()
+    });
+    broadcast('INVOICE_UPDATED', {
+      invNo,
+      invoice: invoiceDatabase[invNo],
+      changedBy: 'REST_API',
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Get single invoice
 app.get('/api/invoice/:invNo', (req, res) => {
   const { invNo } = req.params;
